@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AKQuant 复盘策略报告</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;color:#172033;background:#f4f7fb}*{box-sizing:border-box}body{margin:0;padding:26px}.container{max-width:1380px;margin:auto}header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:18px}h1{margin:0;color:#102a43;font-size:28px}p{color:#64748b;margin:7px 0}.actions{display:flex;gap:8px;flex-wrap:wrap}button,a{border:1px solid #cbd5e1;border-radius:8px;padding:9px 13px;background:#fff;color:#1d4ed8;text-decoration:none;cursor:pointer;font-size:14px}.primary{background:#2563eb;color:#fff;border-color:#2563eb}.notice{padding:12px 15px;border:1px solid #bfdbfe;background:#eff6ff;color:#1e40af;border-radius:9px;margin-bottom:18px}.summary,.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:13px;margin-bottom:18px}.summary-item,.card,.panel{background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 3px 12px #0f172a0a}.summary-item,.card{padding:16px}.label,.summary-label{font-size:13px;color:#64748b}.value,.summary-value{font-size:24px;font-weight:700;margin-top:7px;color:#102a43}.summary-value{font-size:17px}.section-title{margin:28px 0 13px;font-size:20px;font-weight:750;color:#16324f}.sub{font-size:12px;color:#64748b;font-weight:400;margin-left:7px}.panel{padding:18px;margin-bottom:18px}.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:16px}.chart{height:380px;min-width:0}.chart.wide{grid-column:1/-1;height:480px}.up{color:#b91c1c!important}.down{color:#15803d!important}.empty{padding:28px;text-align:center;color:#94a3b8;background:#f8fafc;border-radius:8px}.scroll{overflow-x:auto}table{width:100%;min-width:650px;border-collapse:collapse}th,td{padding:10px 12px;border-bottom:1px solid #edf2f7;text-align:left;white-space:nowrap}th{font-size:12px;color:#64748b;background:#f8fafc}td{font-size:14px}.tag{display:inline-block;padding:3px 8px;border-radius:999px;font-size:12px}.buy{background:#fee2e2;color:#b91c1c}.sell{background:#dcfce7;color:#15803d}details{background:#fff;border:1px solid #e2e8f0;border-radius:10px;margin:12px 0;padding:0 15px}summary{cursor:pointer;padding:14px 0;font-weight:700;color:#16324f}.details-content{padding:0 0 15px}footer{text-align:center;color:#94a3b8;font-size:12px;padding:18px}.error{color:#b91c1c;background:#fff1f2;border:1px solid #fecdd3;padding:12px;border-radius:8px}@media(max-width:700px){body{padding:15px}header{display:block}.actions{margin-top:13px}.charts{grid-template-columns:1fr}.chart{height:330px}.chart.wide{height:400px}}
+</style>
+</head>
+<body><main class="container">
+<header><div><h1>复盘策略报告</h1><p>全部指标与图表均由当前 AKQuant 复盘中心的交易、持仓和行情数据计算；未采集的数据不会使用示例值代替。</p></div><div class="actions"><a href="../akquant_review_center.html">返回复盘中心</a><button id="refresh" class="primary">刷新报告</button></div></header>
+<div id="notice" class="notice">正在读取复盘中心数据…</div>
+<section id="summary" class="summary"></section>
+<div class="section-title">核心指标 <span class="sub">Key Metrics</span></div><section id="metrics" class="grid"></section>
+<div class="section-title">权益与回撤 <span class="sub">Equity & Drawdown</span></div><section class="panel"><div class="charts"><div id="equity" class="chart"></div><div id="drawdown" class="chart"></div></div></section>
+<div class="section-title">收益分析 <span class="sub">Return Analysis</span></div><section class="panel"><div class="charts"><div id="yearly" class="chart"></div><div id="return-dist" class="chart"></div><div id="rolling" class="chart wide"></div></div></section>
+<div class="section-title">基准对比 <span class="sub">Benchmark Comparison</span></div><section id="benchmark-metrics" class="grid"></section><section class="panel"><div id="benchmark" class="chart wide"></div></section>
+<div class="section-title">交易分析 <span class="sub">Trade Analysis</span></div><section class="panel"><div class="charts"><div id="trade-dist" class="chart"></div><div id="pnl-duration" class="chart"></div></div></section>
+<div class="section-title">交易复盘 <span class="sub">K线买卖点</span></div><section class="panel"><div id="trade-kline" class="chart wide"></div></section>
+<div class="section-title">当前组合图表</div><section class="panel"><div class="charts"><div id="exposure" class="chart"></div><div id="changes" class="chart"></div><div id="position-pnl" class="chart"></div><div id="trade-pnl" class="chart"></div></div></section>
+<div class="section-title">组合归因与容量分析 <span class="sub">Attribution & Capacity</span></div><section id="analysis-overview" class="grid"></section>
+<details open><summary>暴露摘要明细</summary><div id="exposure-details" class="details-content scroll"></div></details>
+<details><summary>容量摘要明细</summary><div id="capacity-details" class="details-content scroll"></div></details>
+<details open><summary>归因明细</summary><div id="attribution-details" class="details-content scroll"></div></details>
+<div class="section-title">策略归属聚合 <span class="sub">Strategy Ownership Aggregation</span></div><section class="panel"><div id="ownership" class="scroll"></div></section>
+<details><summary>策略风控拒单明细</summary><div id="risk-details" class="details-content"></div></details>
+<details><summary>强平审计明细</summary><div id="liquidation-details" class="details-content"></div></details>
+<div class="section-title">当前持仓 <span id="pc" class="sub"></span></div><section id="positions" class="panel scroll"></section>
+<div class="section-title">观察票池 <span id="wc" class="sub"></span></div><section id="watchlist" class="panel scroll"></section>
+<div class="section-title">复盘交易列表 <span id="tc" class="sub"></span></div><section id="trades" class="panel scroll"></section>
+<footer id="updated">等待加载</footer>
+</main><script src="review_report.js"></script></body></html>

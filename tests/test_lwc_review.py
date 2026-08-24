@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -33,6 +34,46 @@ class _FakeResult:
     def trades_df(self) -> pd.DataFrame:
         """返回预置的成交表."""
         return self._trades
+
+
+class _ReviewCenterResult(_FakeResult):
+    """带权益和指标的复盘中心结果桩."""
+
+    def __init__(self, trades: pd.DataFrame) -> None:
+        super().__init__(trades)
+        self.equity_curve = pd.Series(
+            [100_000.0, 101_000.0, 99_000.0],
+            index=pd.date_range("2024-01-01", periods=3, freq="D"),
+        )
+        self.positions = pd.DataFrame(
+            {"TEST": [0.0, 100.0]},
+            index=pd.date_range("2024-01-01", periods=2, freq="D"),
+        )
+        self._positions_df = pd.DataFrame(
+            {
+                "symbol": ["TEST"],
+                "long_shares": [100.0],
+                "short_shares": [0.0],
+                "close": [13.0],
+                "market_value": [1300.0],
+                "unrealized_pnl": [280.0],
+                "entry_price": [10.2],
+                "date": [pd.Timestamp("2024-01-02")],
+            }
+        )
+        self.metrics = SimpleNamespace(
+            initial_market_value=100_000.0,
+            end_market_value=99_000.0,
+            total_return_pct=-1.0,
+            max_drawdown_pct=1.98,
+            sharpe_ratio=-0.5,
+            total_pnl=-1_000.0,
+        )
+
+    @property
+    def positions_df(self) -> pd.DataFrame:
+        """返回当前持仓明细."""
+        return self._positions_df
 
 
 def _daily_md(symbol: str = "TEST", n: int = 5) -> pd.DataFrame:
@@ -144,6 +185,24 @@ def test_payload_no_trades_still_renders_candles() -> None:
     assert payload["symbols"][0]["markers"] == []
 
 
+def test_payload_includes_review_center_trade_equity_and_summary_data() -> None:
+    """复盘中心应得到可定位的交易、权益曲线和策略级 KPI 数据。"""
+    payload = build_review_payload(_ReviewCenterResult(_one_trade()), _daily_md())
+
+    trade = payload["trades"][0]
+    assert trade["id"] == "trade-1"
+    assert trade["entry_chart_time"] == "2024-01-01"
+    assert trade["exit_chart_time"] == "2024-01-04"
+    assert trade["net_pnl"] == 0.0  # 测试桩未提供净盈亏时应安全回退
+
+    assert len(payload["equity_curve"]) == 3
+    assert payload["equity_curve"][2]["drawdown_pct"] < 0.0
+    assert payload["summary"]["final_equity"] == 99_000.0
+    assert payload["summary"]["trade_count"] == 1
+    assert payload["positions"][0]["symbol"] == "TEST"
+    assert payload["summary"]["current_position_count"] == 1
+
+
 def test_payload_multi_symbol_dict() -> None:
     """字典行情应为每个标的各产出一段序列."""
     md = {"AAA": _daily_md("AAA"), "BBB": _daily_md("BBB")}
@@ -207,6 +266,19 @@ def test_plot_kline_review_none_market_data_raises() -> None:
         plot_kline_review(_FakeResult(_one_trade()), None)  # type: ignore[arg-type]
 
 
+def test_plot_kline_review_rejects_unsafe_report_url(tmp_path: Path) -> None:
+    """策略报告入口不能注入 javascript/data 协议。"""
+    from akquant.lwc import plot_kline_review
+
+    with pytest.raises(ValueError):
+        plot_kline_review(
+            _FakeResult(_one_trade()),
+            _daily_md(),
+            filename=str(tmp_path / "r.html"),
+            report_url="javascript:alert(1)",
+        )
+
+
 def test_initial_symbol_index_resolved(tmp_path: Path) -> None:
     """initial_symbol 命中时,payload 的初始下标应指向它."""
     from akquant.lwc import plot_kline_review
@@ -246,6 +318,34 @@ def test_render_inlines_both_themes_and_toggle() -> None:
     # 两套主题的背景色都应出现在内联 JSON 中
     assert THEMES["light"]["bg_color"].lower() in text.lower()
     assert THEMES["dark"]["bg_color"].lower() in text.lower()
+
+
+def test_render_includes_review_center_linked_panels() -> None:
+    """页面包含 K 线、权益、交易详情和交易筛选这些联动容器。"""
+    payload = build_review_payload(_ReviewCenterResult(_one_trade()), _daily_md())
+    text = render_review_html(payload, title="t", intraday=False)
+    for element_id in (
+        'id="metrics"',
+        'id="price-chart"',
+        'id="equity-chart"',
+        'id="trade-detail"',
+        'id="trade-list"',
+        'id="trade-filter"',
+    ):
+        assert element_id in text
+
+
+def test_render_includes_strategy_report_entry_when_configured() -> None:
+    """配置策略报告地址后,页头应出现可跳转入口且地址进入 payload."""
+    payload = build_review_payload(_ReviewCenterResult(_one_trade()), _daily_md())
+    text = render_review_html(
+        payload,
+        title="t",
+        intraday=False,
+        report_url="examples/report.html",
+    )
+    assert 'id="report-link"' in text
+    assert '"report_url":"examples/report.html"' in text
 
 
 def test_render_respects_initial_theme() -> None:

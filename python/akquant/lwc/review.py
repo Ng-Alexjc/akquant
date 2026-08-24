@@ -5,6 +5,7 @@ from __future__ import annotations
 import webbrowser
 from pathlib import Path
 from typing import Any, Optional, Union
+from urllib.parse import urlparse
 
 import pandas as pd
 
@@ -27,6 +28,23 @@ def _detect_intraday(
     return False
 
 
+def _normalize_report_url(report_url: Optional[str]) -> Optional[str]:
+    """Allow only relative or HTTP(S) report links in the generated page."""
+    if report_url is None:
+        return None
+    value = str(report_url).strip()
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return value
+    if not parsed.scheme and not value.startswith("//"):
+        return value
+    raise ValueError(
+        "report_url 只支持相对路径或 http(s) URL,不支持 javascript/data 等协议。"
+    )
+
+
 def plot_kline_review(
     result: Any,
     market_data: Union[pd.DataFrame, dict[str, pd.DataFrame]],
@@ -36,6 +54,7 @@ def plot_kline_review(
     filename: str = "akquant_review.html",
     theme: str = "light",
     initial_symbol: Optional[str] = None,
+    report_url: Optional[str] = None,
     show: bool = False,
 ) -> str:
     """生成离线自包含的 LWC 交互式 K 线买卖点复盘 HTML.
@@ -45,14 +64,16 @@ def plot_kline_review(
     :param symbols: 可选,限定并排序要复盘的标的;默认全部可用标的.
     :param title: 报告标题(将被 HTML 转义).
     :param filename: 输出 HTML 路径.
-    :param theme: ``"light"`` 或 ``"dark"``.
-    :param initial_symbol: 初始展示的标的;缺省为首个.
-    :param show: 是否在浏览器中打开.
+        :param theme: ``"light"`` 或 ``"dark"``.
+        :param initial_symbol: 初始展示的标的;缺省为首个.
+        :param report_url: 可选的策略回测报告相对路径或 http(s) URL;提供后在页头显示入口.
+        :param show: 是否在浏览器中打开.
     :return: 写出的 HTML 文件绝对路径.
     :raises ValueError: ``market_data`` 为空,或无有效行情可复盘.
     """
     if market_data is None:
         raise ValueError("plot_kline_review 需要 market_data(K 线复盘的行情来源)。")
+    safe_report_url = _normalize_report_url(report_url)
     initial_theme = theme if theme in THEMES else "light"
     payload = build_review_payload(result, market_data, symbols=symbols)
     rendered_symbols = [s["symbol"] for s in payload["symbols"]]
@@ -69,6 +90,7 @@ def plot_kline_review(
         initial_theme=initial_theme,
         intraday=intraday,
         initial_symbol_index=initial_index,
+        report_url=safe_report_url,
     )
     out_path = Path(filename).resolve()
     out_path.write_text(html_text, encoding="utf-8")

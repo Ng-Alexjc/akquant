@@ -87,6 +87,7 @@ path = result.viz.review(
     title="AKQuant 交易复盘",
     theme="dark",          # 初始主题 "light" / "dark"，页面内可即时切换
     filename="akquant_review.html",
+    report_url="akquant_report.html",  # 可选：页头进入完整策略回测报告
     show=False,            # True 则自动打开浏览器
 )
 ```
@@ -95,6 +96,7 @@ path = result.viz.review(
 
 - 生成的 HTML 内联了 lightweight-charts，**无 CDN 依赖**，可离线打开与归档。
 - 页面顶部有**明暗主题切换按钮**，`theme` 参数只决定初始主题；切换时即时重着色，无需重新生成文件。
+- 传入 `report_url` 后，页面顶部显示“策略回测报告”入口，可跳转到 `result.viz.report()` 生成的完整绩效报告。
 - 多标的行情（`{symbol: df}`）会在页面顶部提供标的切换下拉，`initial_symbol` 可指定初始展示标的。
 - 行情列名大小写不敏感，并兼容中文列名（`开盘/最高/最低/收盘/成交量/日期` 等）。
 - 日频数据用 `YYYY-MM-DD` 时间轴，日内数据自动切换为带时分的时间轴。

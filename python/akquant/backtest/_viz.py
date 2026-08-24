@@ -199,6 +199,7 @@ class VizNamespace:
         filename: str = "akquant_review.html",
         theme: str = "light",
         initial_symbol: Optional[str] = None,
+        report_url: Optional[str] = None,
         show: bool = False,
     ) -> str:
         """LWC 交互式 K 线交易复盘(离线自包含 HTML).
@@ -213,6 +214,7 @@ class VizNamespace:
         :param filename: 输出 HTML 路径.
         :param theme: ``"light"`` 或 ``"dark"``.
         :param initial_symbol: 初始展示标的;缺省为首个.
+        :param report_url: 可选的策略回测报告相对路径或 http(s) URL;提供后在页头显示入口.
         :param show: 是否在浏览器中打开.
         :return: 写出的 HTML 文件绝对路径.
         :raises ValueError: ``market_data`` 为空或无有效行情可复盘.
@@ -227,5 +229,6 @@ class VizNamespace:
             filename=filename,
             theme=theme,
             initial_symbol=initial_symbol,
+            report_url=report_url,
             show=show,
         )

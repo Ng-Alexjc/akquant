@@ -174,6 +174,191 @@ def _resolve_symbols(
     return []
 
 
+def _number(value: Any, default: float = 0.0) -> float:
+    """Convert a payload value to a finite float without leaking NaN to JSON."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed == parsed else default
+
+
+def _optional_number(value: Any) -> Optional[float]:
+    """Convert a possibly absent DataFrame cell to a finite float."""
+    if pd.isna(value):
+        return None
+    parsed = _number(value, default=float("nan"))
+    return parsed if parsed == parsed else None
+
+
+def _iso_time(value: Any) -> Optional[str]:
+    """Render a timestamp for the trade-detail panel, preserving its timezone."""
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return str(cast(pd.Timestamp, ts).isoformat())
+
+
+def _build_trade_items(
+    trades: pd.DataFrame,
+    symbol_indexes: dict[str, tuple[pd.DatetimeIndex, bool]],
+) -> list[dict[str, Any]]:
+    """Build serialisable, chart-addressable trade records for the review center."""
+    if trades.empty:
+        return []
+
+    items: list[dict[str, Any]] = []
+    for ordinal, (_, row) in enumerate(trades.iterrows(), start=1):
+        symbol = str(row.get("symbol", "")).strip()
+        index_and_freq = symbol_indexes.get(symbol)
+        if index_and_freq is None:
+            continue
+        bar_index, intraday = index_and_freq
+        entry_ts = pd.to_datetime(row.get("entry_time"), errors="coerce")
+        exit_ts = pd.to_datetime(row.get("exit_time"), errors="coerce")
+        entry_chart_time = (
+            _bar_time(_snap_time(cast(pd.Timestamp, entry_ts), bar_index), intraday)
+            if not pd.isna(entry_ts)
+            else None
+        )
+        exit_chart_time = (
+            _bar_time(_snap_time(cast(pd.Timestamp, exit_ts), bar_index), intraday)
+            if not pd.isna(exit_ts)
+            else None
+        )
+        items.append(
+            {
+                "id": f"trade-{ordinal}",
+                "symbol": symbol,
+                "side": str(row.get("side", "Long")).strip() or "Long",
+                "entry_time": _iso_time(row.get("entry_time")),
+                "exit_time": _iso_time(row.get("exit_time")),
+                "entry_chart_time": entry_chart_time,
+                "exit_chart_time": exit_chart_time,
+                "entry_price": _optional_number(row.get("entry_price")),
+                "exit_price": _optional_number(row.get("exit_price")),
+                "quantity": _optional_number(row.get("quantity")),
+                "net_pnl": _number(row.get("net_pnl", row.get("pnl", 0.0))),
+                "return_pct": _number(row.get("return_pct", 0.0)),
+                "mae": _optional_number(row.get("mae")),
+                "mfe": _optional_number(row.get("mfe")),
+                "duration_bars": _optional_number(row.get("duration_bars")),
+                "entry_tag": str(row.get("entry_tag", "") or ""),
+                "exit_tag": str(row.get("exit_tag", "") or ""),
+            }
+        )
+    return items
+
+
+def _build_equity_series(result: Any, intraday: bool) -> list[dict[str, Any]]:
+    """Turn BacktestResult.equity_curve into frontend line-series points."""
+    try:
+        curve = result.equity_curve
+    except (AttributeError, TypeError, ValueError):
+        return []
+    if not isinstance(curve, pd.Series) or curve.empty:
+        return []
+
+    index = pd.to_datetime(curve.index, errors="coerce")
+    points: list[dict[str, Any]] = []
+    peak: Optional[float] = None
+    for raw_time, raw_equity in zip(index, curve.to_numpy()):
+        if pd.isna(raw_time):
+            continue
+        equity = _optional_number(raw_equity)
+        if equity is None:
+            continue
+        ts = cast(pd.Timestamp, raw_time)
+        point_time = _bar_time(ts, intraday)
+        peak = equity if peak is None else max(peak, equity)
+        drawdown_pct = 0.0 if peak == 0.0 else (equity / peak - 1.0) * 100.0
+        points.append(
+            {"time": point_time, "value": equity, "drawdown_pct": drawdown_pct}
+        )
+    return points
+
+
+def _metric_value(metrics: Any, name: str, default: float = 0.0) -> float:
+    """Read an optional native metrics attribute without coupling to its version."""
+    try:
+        return _number(getattr(metrics, name), default)
+    except (AttributeError, TypeError, ValueError):
+        return default
+
+
+def _build_summary(result: Any, trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the compact strategy-level KPI block used by the review center."""
+    metrics = getattr(result, "metrics", None)
+    winners = sum(1 for trade in trades if trade["net_pnl"] > 0)
+    total_pnl = sum(trade["net_pnl"] for trade in trades)
+    positions = _build_position_items(result)
+    final_equity = _metric_value(metrics, "end_market_value")
+    total_exposure = sum(abs(item["market_value"]) for item in positions)
+    return {
+        "initial_equity": _metric_value(metrics, "initial_market_value"),
+        "final_equity": _metric_value(metrics, "end_market_value"),
+        "total_return_pct": _metric_value(metrics, "total_return_pct"),
+        "max_drawdown_pct": _metric_value(metrics, "max_drawdown_pct"),
+        "sharpe_ratio": _metric_value(metrics, "sharpe_ratio"),
+        "total_pnl": _metric_value(metrics, "total_pnl", total_pnl),
+        "trade_count": len(trades),
+        "win_rate": (winners / len(trades) * 100.0) if trades else 0.0,
+        "current_position_count": len(positions),
+        "current_exposure_pct": (
+            total_exposure / final_equity * 100.0 if final_equity else 0.0
+        ),
+    }
+
+
+def _build_position_items(result: Any) -> list[dict[str, Any]]:
+    """Build the final, non-zero holdings pool from a BacktestResult."""
+    try:
+        position_matrix = result.positions
+    except (AttributeError, TypeError, ValueError):
+        position_matrix = None
+    if not isinstance(position_matrix, pd.DataFrame) or position_matrix.empty:
+        return []
+
+    latest_by_symbol: dict[str, pd.Series] = {}
+    try:
+        position_rows = result.positions_df
+    except (AttributeError, TypeError, ValueError):
+        position_rows = pd.DataFrame()
+    if isinstance(position_rows, pd.DataFrame) and not position_rows.empty:
+        for symbol, group in position_rows.groupby("symbol", sort=False):
+            latest_by_symbol[str(symbol).strip()] = group.iloc[-1]
+
+    final_row = position_matrix.iloc[-1]
+    final_equity = _metric_value(getattr(result, "metrics", None), "end_market_value")
+    items: list[dict[str, Any]] = []
+    for raw_symbol, raw_quantity in final_row.items():
+        symbol = str(raw_symbol).strip()
+        quantity = _number(raw_quantity)
+        if not symbol or abs(quantity) < 1e-12:
+            continue
+        latest = latest_by_symbol.get(symbol)
+        market_value = _number(latest.get("market_value")) if latest is not None else 0.0
+        items.append(
+            {
+                "symbol": symbol,
+                "quantity": quantity,
+                "side": "Long" if quantity > 0 else "Short",
+                "last_price": _number(latest.get("close")) if latest is not None else 0.0,
+                "market_value": market_value,
+                "weight_pct": (
+                    abs(market_value) / final_equity * 100.0 if final_equity else 0.0
+                ),
+                "unrealized_pnl": (
+                    _number(latest.get("unrealized_pnl")) if latest is not None else 0.0
+                ),
+                "entry_price": (
+                    _number(latest.get("entry_price")) if latest is not None else 0.0
+                ),
+            }
+        )
+    return items
+
+
 def build_review_payload(
     result: Any,
     market_data: Union[pd.DataFrame, dict[str, pd.DataFrame]],
@@ -189,6 +374,7 @@ def build_review_payload(
     """
     trades = result.trades_df if hasattr(result, "trades_df") else pd.DataFrame()
     series: list[dict[str, Any]] = []
+    symbol_indexes: dict[str, tuple[pd.DatetimeIndex, bool]] = {}
     for sym in _resolve_symbols(market_data, trades, symbols):
         df = extract_symbol_market_data(market_data, sym)
         if df.empty:
@@ -205,6 +391,7 @@ def build_review_payload(
         if not candles:
             continue
         markers = _build_markers(trades, sym, index, intraday)
+        symbol_indexes[sym] = (index, intraday)
         series.append(
             {
                 "symbol": sym,
@@ -218,4 +405,12 @@ def build_review_payload(
             "无法构建复盘数据:未找到任何标的的有效 OHLC 行情。"
             "请检查 market_data 是否包含目标标的且列名可识别。"
         )
-    return {"symbols": series}
+    review_intraday = any(intraday for _, intraday in symbol_indexes.values())
+    trade_items = _build_trade_items(trades, symbol_indexes)
+    return {
+        "symbols": series,
+        "trades": trade_items,
+        "positions": _build_position_items(result),
+        "equity_curve": _build_equity_series(result, review_intraday),
+        "summary": _build_summary(result, trade_items),
+    }

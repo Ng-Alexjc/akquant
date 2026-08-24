@@ -1,0 +1,91 @@
+{
+  "watchlist": [
+    {
+      "symbol": "603629",
+      "name": "利通电子",
+      "self_price": 125.97,
+      "note": ""
+    },
+    {
+      "symbol": "002851",
+      "name": "麦格米特",
+      "self_price": 119.84,
+      "note": ""
+    },
+    {
+      "symbol": "300274",
+      "name": "阳光电源",
+      "self_price": 111.5,
+      "note": ""
+    },
+    {
+      "symbol": "300394",
+      "name": "天孚通信",
+      "self_price": 249.5,
+      "note": ""
+    },
+    {
+      "symbol": "300136",
+      "name": "信维通信",
+      "self_price": 58.92,
+      "note": ""
+    }
+  ],
+  "positions": [
+    {
+      "symbol": "600105",
+      "name": "永鼎股份",
+      "quantity": 1600.0,
+      "entry_price": 40.83
+    },
+    {
+      "symbol": "002409",
+      "name": "雅克科技",
+      "quantity": 100.0,
+      "entry_price": 140.592
+    }
+  ],
+  "manual_trades": [
+    {
+      "id": "manual-1",
+      "symbol": "300759",
+      "name": "康龙化成",
+      "action": "buy",
+      "price": 51.67,
+      "quantity": 500.0,
+      "net_pnl": 0.0,
+      "time": "2026-08-23T13:07:03.503734+00:00"
+    },
+    {
+      "id": "manual-2",
+      "symbol": "300759",
+      "name": "康龙化成",
+      "action": "sell",
+      "price": 46.1,
+      "quantity": 500.0,
+      "net_pnl": -2785.0,
+      "time": "2026-08-24T11:13:41.307827+00:00"
+    },
+    {
+      "id": "manual-3",
+      "symbol": "600105",
+      "name": "永鼎股份",
+      "action": "buy",
+      "price": 40.83,
+      "quantity": 1600.0,
+      "net_pnl": 0.0,
+      "time": "2026-08-24T11:14:25.096626+00:00"
+    },
+    {
+      "id": "manual-4",
+      "symbol": "002409",
+      "name": "雅克科技",
+      "action": "buy",
+      "price": 140.592,
+      "quantity": 100.0,
+      "net_pnl": 0.0,
+      "time": "2026-08-24T11:15:31.873457+00:00"
+    }
+  ],
+  "initialized": true
+}
