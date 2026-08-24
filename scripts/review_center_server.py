@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -37,6 +39,16 @@ STATE_FILE = ".review_center_state.json"
 REVIEW_INITIAL_EQUITY = 100000.0
 KLINE_HISTORY_DAYS = 900
 QUOTE_CACHE_TTL_SECONDS = 90.0
+SIGNAL_MODEL_MIN_BARS = 90
+SIGNAL_MODEL_MAX_SAMPLES = 360
+WATCH_SCORE_THRESHOLD = 60.0
+WATCH_PROBABILITY_THRESHOLD = 0.50
+BUY_SCORE_THRESHOLD = 65.0
+BUY_PROBABILITY_THRESHOLD = 0.54
+STRONG_BUY_SCORE_THRESHOLD = 72.0
+STRONG_BUY_PROBABILITY_THRESHOLD = 0.58
+ADD_SCORE_THRESHOLD = 75.0
+ADD_PROBABILITY_THRESHOLD = 0.60
 _DIRECT_OPENER = build_opener(ProxyHandler({}))
 _STOCK_KLINE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _STOCK_KLINE_CACHE_LOCK = RLock()
@@ -68,28 +80,455 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _pool_signals(state: dict[str, Any], quotes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return a strategy-neutral signal contract for the first UI iteration."""
-    signals: list[dict[str, Any]] = []
+def _mean(values: list[float]) -> float:
+    """Return a safe arithmetic mean for market feature calculations."""
+    return statistics.fmean(values) if values else 0.0
+
+
+def _clip(value: float, lower: float, upper: float) -> float:
+    """Clamp a numeric feature to a stable range."""
+    return max(lower, min(upper, value))
+
+
+def _return(closes: list[float], end: int, lookback: int) -> float:
+    """Calculate a lookback return ending at ``end`` without future data."""
+    start = end - lookback
+    if start < 0 or closes[start] <= 0:
+        return 0.0
+    return closes[end] / closes[start] - 1.0
+
+
+def _rsi(closes: list[float], end: int, period: int = 14) -> float:
+    """Calculate Wilder-style RSI over the requested historical slice."""
+    start = end - period
+    if start < 0:
+        return 50.0
+    gains = 0.0
+    losses = 0.0
+    for idx in range(start + 1, end + 1):
+        change = closes[idx] - closes[idx - 1]
+        if change >= 0:
+            gains += change
+        else:
+            losses -= change
+    if losses <= 1e-12:
+        return 100.0 if gains > 0 else 50.0
+    relative_strength = gains / losses
+    return 100.0 - 100.0 / (1.0 + relative_strength)
+
+
+def _atr(candles: list[dict[str, Any]], period: int = 14) -> float:
+    """Calculate a simple ATR used only for stop/take-profit reference levels."""
+    if len(candles) < 2:
+        return 0.0
+    start = max(1, len(candles) - period)
+    true_ranges: list[float] = []
+    for idx in range(start, len(candles)):
+        high = _float(candles[idx].get("high"))
+        low = _float(candles[idx].get("low"))
+        previous_close = _float(candles[idx - 1].get("close"))
+        true_ranges.append(
+            max(high - low, abs(high - previous_close), abs(low - previous_close))
+        )
+    return _mean(true_ranges)
+
+
+def _feature_row(
+    closes: list[float], volumes: list[float], end: int
+) -> list[float] | None:
+    """Build leakage-free price/volume features for one historical day."""
+    if end < 60 or closes[end] <= 0:
+        return None
+    daily_returns = [
+        closes[idx] / closes[idx - 1] - 1.0
+        for idx in range(end - 9, end + 1)
+        if closes[idx - 1] > 0
+    ]
+    ma5 = _mean(closes[end - 4 : end + 1])
+    ma20 = _mean(closes[end - 19 : end + 1])
+    ma60 = _mean(closes[end - 59 : end + 1])
+    volume5 = _mean(volumes[end - 4 : end + 1])
+    volume20 = _mean(volumes[end - 19 : end + 1])
+    return [
+        _return(closes, end, 1),
+        _return(closes, end, 5),
+        _return(closes, end, 20),
+        ma5 / ma20 - 1.0 if ma20 else 0.0,
+        ma20 / ma60 - 1.0 if ma60 else 0.0,
+        statistics.pstdev(daily_returns) if len(daily_returns) > 1 else 0.0,
+        (_rsi(closes, end) - 50.0) / 50.0,
+        volume5 / volume20 - 1.0 if volume20 else 0.0,
+    ]
+
+
+def _predict_up_probability(
+    closes: list[float], volumes: list[float]
+) -> tuple[float, float | None, int]:
+    """Fit a chronological logistic model and predict next-day up probability."""
+    if len(closes) < SIGNAL_MODEL_MIN_BARS:
+        return 0.5, None, 0
+
+    features: list[list[float]] = []
+    labels: list[int] = []
+    for end in range(60, len(closes) - 1):
+        row = _feature_row(closes, volumes, end)
+        if row is None or not all(math.isfinite(value) for value in row):
+            continue
+        features.append(row)
+        labels.append(1 if closes[end + 1] > closes[end] else 0)
+
+    if len(features) > SIGNAL_MODEL_MAX_SAMPLES:
+        features = features[-SIGNAL_MODEL_MAX_SAMPLES:]
+        labels = labels[-SIGNAL_MODEL_MAX_SAMPLES:]
+    latest = _feature_row(closes, volumes, len(closes) - 1)
+    if latest is None or len(features) < 30 or len(set(labels)) < 2:
+        return 0.5, None, len(features)
+
+    try:
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.metrics import accuracy_score
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        def make_model() -> Pipeline:
+            return Pipeline(
+                [
+                    ("scale", StandardScaler()),
+                    (
+                        "model",
+                        LogisticRegression(
+                            class_weight="balanced", max_iter=500, random_state=0
+                        ),
+                    ),
+                ]
+            )
+
+        validation_accuracy: float | None = None
+        validation_size = min(60, max(20, len(features) // 5))
+        split = len(features) - validation_size
+        if split >= 30 and len(set(labels[:split])) >= 2:
+            validation_model = make_model()
+            validation_model.fit(features[:split], labels[:split])
+            validation_accuracy = float(
+                accuracy_score(
+                    labels[split:], validation_model.predict(features[split:])
+                )
+            )
+
+        model = make_model()
+        model.fit(features, labels)
+        probability = float(model.predict_proba([latest])[0][1])
+        return _clip(probability, 0.0, 1.0), validation_accuracy, len(features)
+    except Exception:
+        # The review center remains usable if the optional ML stack is unavailable.
+        return 0.5, None, len(features)
+
+
+def _analyze_series(series: dict[str, Any]) -> dict[str, Any]:
+    """Build selection, prediction and risk features from one daily K-line series."""
+    candles = [
+        candle
+        for candle in list(series.get("candles") or [])
+        if _float(candle.get("close")) > 0
+    ]
+    if len(candles) < 20:
+        return {"available": False, "reason": "历史数据不足"}
+
+    volume_by_time = {
+        str(item.get("time")): _float(item.get("value"))
+        for item in list(series.get("volume") or [])
+    }
+    closes = [_float(candle.get("close")) for candle in candles]
+    volumes = [volume_by_time.get(str(candle.get("time")), 0.0) for candle in candles]
+    close = closes[-1]
+    ma5 = _mean(closes[-5:])
+    ma20 = _mean(closes[-20:])
+    ma60 = _mean(closes[-60:]) if len(closes) >= 60 else ma20
+    momentum20 = _return(closes, len(closes) - 1, min(20, len(closes) - 1))
+    momentum60 = _return(closes, len(closes) - 1, min(60, len(closes) - 1))
+    rsi14 = _rsi(closes, len(closes) - 1)
+    volume5 = _mean(volumes[-5:])
+    volume20 = _mean(volumes[-20:])
+    volume_ratio = volume5 / volume20 if volume20 else 1.0
+    probability, validation_accuracy, training_samples = _predict_up_probability(
+        closes, volumes
+    )
+
+    score = 50.0
+    score += _clip(momentum20 * 150.0, -20.0, 20.0)
+    score += 10.0 if close > ma20 else -10.0
+    score += 8.0 if ma20 > ma60 else -8.0
+    score += 5.0 if 45.0 <= rsi14 <= 70.0 else (-6.0 if rsi14 >= 80.0 else 0.0)
+    score += _clip((volume_ratio - 1.0) * 5.0, -5.0, 5.0)
+    score = round(_clip(score, 0.0, 100.0), 1)
+    atr14 = _atr(candles)
+    recent_high20 = max(_float(candle.get("high")) for candle in candles[-20:])
+    recent_low20 = min(_float(candle.get("low")) for candle in candles[-20:])
+    resistance_candidates = [
+        level
+        for level in (ma5, ma20, ma60, recent_high20)
+        if level > close * 1.001
+    ]
+    support_candidates = [
+        level
+        for level in (ma5, ma20, ma60, recent_low20)
+        if 0 < level < close * 0.999
+    ]
+    resistance_price = (
+        min(resistance_candidates)
+        if resistance_candidates
+        else close + max(2.0 * atr14, close * 0.05)
+    )
+    support_price = (
+        max(support_candidates)
+        if support_candidates
+        else max(0.0, close - max(2.0 * atr14, close * 0.05))
+    )
+    trend = (
+        "多头排列"
+        if close > ma20 > ma60
+        else ("空头排列" if close < ma20 < ma60 else "趋势混合")
+    )
+    if close > ma20 > ma60 and momentum20 > 0:
+        trend_direction = "上升"
+    elif close < ma20 < ma60 and momentum20 < 0:
+        trend_direction = "下降"
+    elif close >= ma20 and momentum20 >= 0:
+        trend_direction = "偏强"
+    elif close <= ma20 and momentum20 <= 0:
+        trend_direction = "偏弱"
+    else:
+        trend_direction = "震荡"
+    return {
+        "available": True,
+        "as_of": candles[-1].get("time"),
+        "close": close,
+        "ma5": ma5,
+        "ma20": ma20,
+        "ma60": ma60,
+        "momentum20": momentum20,
+        "momentum60": momentum60,
+        "rsi14": rsi14,
+        "volume_ratio": volume_ratio,
+        "atr14": atr14,
+        "resistance_price": resistance_price,
+        "support_price": support_price,
+        "selection_score": score,
+        "up_probability": probability,
+        "validation_accuracy": validation_accuracy,
+        "training_samples": training_samples,
+        "trend": trend,
+        "trend_direction": trend_direction,
+    }
+
+
+def _pool_signals(
+    state: dict[str, Any], quotes: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Convert pool analysis into ranked selection and executable-action advice."""
+    positions = {str(item.get("symbol")): item for item in state["positions"]}
+    allowed_symbols = {
+        str(item.get("symbol"))
+        for item in list(state.get("watchlist") or [])
+        + list(state.get("positions") or [])
+        if item.get("symbol")
+    }
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for item in quotes:
         symbol = str(item.get("symbol", ""))
-        if not symbol or item.get("quote_error"):
+        if (
+            not symbol
+            or symbol not in allowed_symbols
+            or symbol in seen
+            or item.get("quote_error")
+        ):
             continue
-        holding = any(str(pos.get("symbol")) == symbol for pos in state["positions"])
-        signal = {
-            "symbol": symbol,
-            "name": item.get("name", symbol),
-            "pool": "持仓" if holding else "观察",
-            "action": "观望",
-            "suggested_price": _float(item.get("current_price")),
-            "reason": "待接入策略分析",
-            "updated_at": item.get("updated_at") or _now_iso(),
-        }
-        # 观察票只有在策略给出明确的买卖判断时才展示；持仓则始终保留，
-        # 方便后续直接对持仓输出观望、减仓或卖出建议。
-        if holding or signal["action"] in {"买入", "卖出"}:
-            signals.append(signal)
-    return signals
+        seen.add(symbol)
+        analysis = dict(item.get("analysis") or {})
+        if not analysis.get("available"):
+            continue
+        candidates.append({"item": item, "analysis": analysis})
+
+    candidates.sort(
+        key=lambda candidate: _float(candidate["analysis"].get("selection_score")),
+        reverse=True,
+    )
+    signals: list[dict[str, Any]] = []
+    for rank, candidate in enumerate(candidates, start=1):
+        item = candidate["item"]
+        analysis = candidate["analysis"]
+        symbol = str(item["symbol"])
+        position = positions.get(symbol)
+        holding = position is not None and _float(position.get("quantity")) > 0
+        close = _float(analysis.get("close"), _float(item.get("current_price")))
+        current_price = _float(item.get("current_price"), close) or close
+        score = _float(analysis.get("selection_score"))
+        probability = _float(analysis.get("up_probability"), 0.5)
+        momentum20 = _float(analysis.get("momentum20"))
+        ma5 = _float(analysis.get("ma5"))
+        ma20 = _float(analysis.get("ma20"))
+        ma60 = _float(analysis.get("ma60"))
+        atr14 = _float(analysis.get("atr14"))
+        entry_price = _float(position.get("entry_price")) if position else 0.0
+        position_return = current_price / entry_price - 1.0 if entry_price > 0 else 0.0
+
+        action = "观望"
+        trigger = "等待评分、预测概率与趋势形成共振"
+        if holding:
+            hard_stop = entry_price > 0 and position_return <= -0.08
+            trend_exit = current_price < ma60 and momentum20 < 0
+            model_exit = probability <= 0.40 and current_price < ma20
+            if hard_stop or trend_exit or model_exit:
+                action = "卖出"
+                trigger = (
+                    "触发 8% 持仓止损"
+                    if hard_stop
+                    else ("跌破 MA60 且 20 日动量转负" if trend_exit else "预测转弱且跌破 MA20")
+                )
+            elif (
+                score >= ADD_SCORE_THRESHOLD
+                and probability >= ADD_PROBABILITY_THRESHOLD
+                and current_price > ma20 > ma60
+            ):
+                action = "加仓"
+                trigger = "高评分、上涨概率与多头排列共振"
+            else:
+                trigger = "持仓未触发止损或加仓条件"
+        elif (
+            score >= STRONG_BUY_SCORE_THRESHOLD
+            and probability >= STRONG_BUY_PROBABILITY_THRESHOLD
+            and current_price > ma20 > ma60
+        ):
+            action = "强势买入"
+            trigger = "达到强势买入阈值，评分、概率与多头排列共振"
+        elif (
+            score >= BUY_SCORE_THRESHOLD
+            and probability >= BUY_PROBABILITY_THRESHOLD
+            and current_price > ma20
+        ):
+            action = "买入"
+            trigger = "达到普通买入阈值，评分与上涨概率同步转强"
+        elif (
+            score >= WATCH_SCORE_THRESHOLD
+            and probability >= WATCH_PROBABILITY_THRESHOLD
+        ):
+            action = "关注"
+            trigger = "达到候选关注阈值，等待价格趋势进一步确认"
+
+        validation_accuracy = analysis.get("validation_accuracy")
+        validation_text = (
+            f" · 验证{_float(validation_accuracy) * 100:.0f}%"
+            if validation_accuracy is not None
+            else ""
+        )
+        stop_price = max(
+            0.0, current_price - max(2.0 * atr14, current_price * 0.06)
+        )
+        take_profit = current_price + max(
+            3.0 * atr14, current_price * 0.10
+        )
+        reason = (
+            f"{trigger}；20日动量 {momentum20:+.1%} · {analysis.get('trend', '趋势未知')}"
+            f"{validation_text} · 风险参考 {stop_price:.2f}/{take_profit:.2f}"
+        )
+        resistance_price = _float(analysis.get("resistance_price"), take_profit)
+        support_price = _float(analysis.get("support_price"), stop_price)
+        execution_signal: dict[str, Any] | None = None
+        suggested_price: float | None = None
+        quantity = 0.0
+        if action in {"买入", "强势买入", "加仓", "卖出"}:
+            if action == "卖出":
+                quantity = _float(position.get("quantity")) if position else 0.0
+                side = "sell"
+                suggested_price = current_price
+            else:
+                # Prefer a pullback around MA5/MA20 instead of presenting the
+                # stored position cost or the latest quote as a buy suggestion.
+                pullback_price = ma5 if ma5 > 0 else ma20
+                suggested_price = min(current_price, pullback_price or current_price)
+                # Advisory sizing: one board lot or roughly 10% of review capital.
+                board_lots = math.floor(
+                    (REVIEW_INITIAL_EQUITY * 0.10) / suggested_price / 100
+                )
+                quantity = float(max(1, board_lots) * 100)
+                side = "buy"
+            if quantity > 0:
+                signal_date = str(analysis.get("as_of") or item.get("updated_at") or "latest")
+                execution_signal = {
+                    "signal_id": f"review-{symbol}-{signal_date}-{side}",
+                    "symbol": symbol,
+                    "action": side,
+                    "quantity": quantity,
+                    "price": round(suggested_price, 3),
+                    "strategy_id": "review_center_momentum_logit_v1",
+                    "tag": f"score={score:.1f};up_probability={probability:.4f}",
+                }
+        direction = analysis.get("trend_direction") or analysis.get("trend") or "趋势未知"
+        evaluation_parts = [
+            trigger,
+            f"20日动量 {momentum20:+.1%}，趋势{direction}",
+        ]
+        if suggested_price is not None:
+            advice_label = "建议卖出价" if action == "卖出" else "建议买入价"
+            quantity_text = f"，建议数量 {quantity:g}" if quantity > 0 else ""
+            evaluation_parts.append(
+                f"{advice_label} {suggested_price:.2f}{quantity_text}"
+            )
+        else:
+            evaluation_parts.append(f"现价 {current_price:.2f}，继续观察")
+        evaluation = "；".join(evaluation_parts)
+        signals.append(
+            {
+                "symbol": symbol,
+                "name": item.get("name", symbol),
+                "pool": "持仓" if holding else "观察",
+                "action": action,
+                "current_price": round(current_price, 3),
+                "suggested_price": (
+                    round(suggested_price, 3) if suggested_price is not None else None
+                ),
+                "selection_rank": rank,
+                "selection_score": score,
+                "up_probability": probability,
+                "validation_accuracy": validation_accuracy,
+                "momentum20": momentum20,
+                "trend": analysis.get("trend"),
+                "trend_direction": analysis.get("trend_direction"),
+                "resistance_price": round(resistance_price, 3),
+                "support_price": round(support_price, 3),
+                "evaluation": evaluation,
+                "stop_price": round(stop_price, 3),
+                "take_profit_price": round(take_profit, 3),
+                "execution_signal": execution_signal,
+                "reason": reason,
+                "updated_at": analysis.get("as_of") or item.get("updated_at") or _now_iso(),
+            }
+        )
+
+    # Observation candidates that still resolve to "观望" remain visible in
+    # the observation table with their trend, but do not occupy signal rows.
+    signals = [
+        signal
+        for signal in signals
+        if signal.get("pool") == "持仓" or signal.get("action") != "观望"
+    ]
+
+    action_priority = {
+        "卖出": 0,
+        "强势买入": 1,
+        "买入": 2,
+        "加仓": 3,
+        "关注": 4,
+        "观望": 5,
+    }
+    return sorted(
+        signals,
+        key=lambda signal: (
+            action_priority.get(str(signal.get("action")), 9),
+            int(signal.get("selection_rank", 9999)),
+        ),
+    )
 
 
 def _code(symbol: str) -> str:
@@ -479,6 +918,7 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
         try:
             quote = stock_kline(str(item.get("symbol", "")), refresh=refresh)
             merged = dict(item)
+            series = dict(quote.get("series") or {})
             for key, value in quote.items():
                 if key == "series":
                     continue
@@ -487,6 +927,7 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                 merged[key] = value
             if not item.get("self_price"):
                 merged["self_price"] = quote.get("current_price", 0.0)
+            merged["analysis"] = _analyze_series(series)
             return merged
         except Exception as exc:  # noqa: BLE001 - one stale symbol must not break all pools
             return {**item, "quote_error": str(exc)}

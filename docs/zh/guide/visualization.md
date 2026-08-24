@@ -103,3 +103,36 @@ path = result.viz.review(
 - 面向**大数据量 / 日内**优化:payload 用向量化构建、时间戳自动去重,数万根 K 线也能流畅复盘(这正是相对 plotly 分析图的核心优势)。
 
 完整示例见 `examples/67_lwc_trade_review.py`。
+
+## 本地复盘中心的选股与预测信号
+
+仓库内的本地复盘中心可直接对观察票池和持仓票池运行日线分析：
+
+```bash
+python scripts/review_center_server.py --host 127.0.0.1 --port 8765 --root .
+```
+
+打开 `http://127.0.0.1:8765/akquant_review_center.html` 后，页面会通过
+`/api/pools` 获取以下结构化结果：
+
+- `selection_rank` / `selection_score`：20 日动量、MA20/MA60 趋势、RSI 与量能组成的票池排序；
+- `up_probability`：使用最多 360 个历史样本训练的标准化 Logistic Regression 下一日上涨概率；
+- `action`：使用分级阈值产生关注、买入、强势买入、加仓、卖出或观望；候选关注为评分 `60`/概率 `50%`，普通买入为 `65`/`54%`，强势买入为 `72`/`58%`，加仓为 `75`/`60%`；
+- `stop_price` / `take_profit_price`：基于 ATR 与百分比下限生成的风险参考价；
+- `execution_signal`：仅在明确买卖/加仓时返回，可直接映射为 `akquant.signal.Signal` 的字段。
+
+例如把明确触发的建议交给 AKQuant 信号入口：
+
+```python
+import requests
+from akquant.signal import QueueSignalSource, Signal
+
+source = QueueSignalSource()
+payload = requests.get("http://127.0.0.1:8765/api/pools", timeout=30).json()
+for item in payload["signals"]:
+    if item["execution_signal"]:
+        source.put(Signal(**item["execution_signal"]))
+```
+
+`execution_signal` 是“可下发格式”，不代表页面会自动实盘下单。生产使用时仍应先在
+`trading_mode="paper"` 验证，并按真实账户资金、A 股代码格式和券商柜台能力调整数量。
