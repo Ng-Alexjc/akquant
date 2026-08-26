@@ -29,6 +29,24 @@
       "name": "信维通信",
       "self_price": 58.92,
       "note": ""
+    },
+    {
+      "symbol": "002463",
+      "name": "沪电股份",
+      "self_price": 119.22,
+      "note": ""
+    },
+    {
+      "symbol": "600487",
+      "name": "亨通光电",
+      "self_price": 64.83,
+      "note": ""
+    },
+    {
+      "symbol": "002192",
+      "name": "融捷股份",
+      "self_price": 72.17,
+      "note": ""
     }
   ],
   "positions": [
@@ -37,12 +55,6 @@
       "name": "永鼎股份",
       "quantity": 1600.0,
       "entry_price": 40.83
-    },
-    {
-      "symbol": "002409",
-      "name": "雅克科技",
-      "quantity": 100.0,
-      "entry_price": 140.592
     }
   ],
   "manual_trades": [
@@ -85,6 +97,16 @@
       "quantity": 100.0,
       "net_pnl": 0.0,
       "time": "2026-08-24T11:15:31.873457+00:00"
+    },
+    {
+      "id": "manual-5",
+      "symbol": "002409",
+      "name": "雅克科技",
+      "action": "sell",
+      "price": 135.23,
+      "quantity": 100.0,
+      "net_pnl": -536.2000000000023,
+      "time": "2026-08-26T12:16:39.154679+00:00"
     }
   ],
   "initialized": true

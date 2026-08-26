@@ -59,11 +59,22 @@ docs = [
 signal-redis = [
     "redis>=5.0.0",
 ]
+review-ai = [
+    "openai>=1.109.0",
+    "PyYAML>=6.0.0",
+    "scikit-learn>=1.5.0",
+    "httpx>=0.28.1",
+    "mcp>=2.1.0",
+]
 full = [
     "plotly>=5.0.0",
     "scikit-learn>=1.0.0",
     "torch>=2.0.0",
     "quantstats>=0.0.60",
+    "openai>=1.109.0",
+    "PyYAML>=6.0.0",
+    "httpx>=0.28.1",
+    "mcp>=2.1.0",
 ]
 dev = [
     "mypy>=1.0.0",

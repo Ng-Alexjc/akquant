@@ -70,9 +70,7 @@ def test_pool_signals_rank_candidates_and_trigger_buy_sell() -> None:
             {"symbol": "CANDIDATE"},
             {"symbol": "IDLE"},
         ],
-        "positions": [
-            {"symbol": "DOWN", "quantity": 100.0, "entry_price": 100.0}
-        ],
+        "positions": [{"symbol": "DOWN", "quantity": 100.0, "entry_price": 100.0}],
         "manual_trades": [],
     }
     quotes = [
@@ -176,14 +174,14 @@ def test_pool_signals_rank_candidates_and_trigger_buy_sell() -> None:
     by_symbol = {signal["symbol"]: signal for signal in signals}
 
     assert by_symbol["UP"]["selection_rank"] == 1
-    assert by_symbol["UP"]["action"] == "强势买入"
-    assert by_symbol["DOWN"]["action"] == "卖出"
-    assert by_symbol["CANDIDATE"]["action"] == "关注"
+    assert by_symbol["UP"]["action"] == "买入"
+    assert by_symbol["DOWN"]["action"] == "止损"
+    assert by_symbol["CANDIDATE"]["action"] == "等待买入"
     assert by_symbol["CANDIDATE"]["execution_signal"] is None
     assert by_symbol["UP"]["execution_signal"]["action"] == "buy"
     assert by_symbol["DOWN"]["execution_signal"]["quantity"] == 100.0
     assert "OUTSIDE" not in by_symbol
-    assert "IDLE" not in by_symbol
+    assert by_symbol["IDLE"]["action"] == "观察"
     assert by_symbol["UP"]["trend_direction"] == "上升"
     assert by_symbol["UP"]["suggested_price"] == 115.0
     assert by_symbol["UP"]["execution_signal"]["price"] == 115.0
@@ -191,4 +189,4 @@ def test_pool_signals_rank_candidates_and_trigger_buy_sell() -> None:
     assert "建议卖出价 90.00" in by_symbol["DOWN"]["evaluation"]
     assert by_symbol["DOWN"]["stop_price"] < by_symbol["DOWN"]["suggested_price"]
     assert by_symbol["UP"]["take_profit_price"] > by_symbol["UP"]["suggested_price"]
-    assert signals[0]["action"] == "卖出"
+    assert signals[0]["action"] == "止损"

@@ -4,6 +4,8 @@
 
 如果目标是把大模型接入本地复盘中心，对传统选股、上涨概率、持仓、市场环境和个人交易经验进行综合分析，请先阅读 [复盘、选股与趋势预测的大模型增强方案](../meta/llm_trade_analysis_development_plan.md)。该方案与本文的“辅助生成策略代码”用途不同，并提供了独立的 [交易分析 Prompt 模板](llm_trade_prompt_template.md)、[统一输出结构](llm_trade_output_schema.md)、[个人交易知识库](llm_trade_personal_knowledge.md) 和 [知识卡片模板](llm_trade_knowledge_template.md)。
 
+复盘中心 AI 已实现。复制 `llm_trade.example.yaml` 为 Git 忽略的 `llm_trade.local.yaml`，填写 OpenAI 兼容 Provider 的 `url`、`sk`、`model`；GPT、DeepSeek、Qwen 可通过新增 Provider 配置切换。页面只对用户勾选的票调用模型，默认展示融合结果，展开后查看传统、LLM 与融合明细。模型不可用时保留明确状态和 `null` 概率，不用 `0.5` 冒充中性。
+
 ## 1. 核心 Prompt 模板 (基础策略)
 
 你可以将以下内容直接复制给大模型，作为"System Prompt"或对话的开头，让模型快速理解 AKQuant 的编程规范。

@@ -1,6 +1,6 @@
-# 传统逻辑、大模型与融合结果的统一输出结构（评审草案）
+# 传统逻辑、大模型与融合结果的统一输出结构
 
-> 状态：仅供评审，尚未接入代码。
+> 状态：Schema 1.3 已接入代码；本文同时作为可编辑字段与业务定义基准。
 
 ## 1. 设计原则
 
@@ -17,7 +17,7 @@
 
 ```json
 {
-  "schema_version": "1.2-draft",
+  "schema_version": "1.2",
   "analysis_id": "string",
   "as_of": "ISO-8601",
   "strategy_style": "a_share_short_term_trend_swing",
@@ -36,6 +36,25 @@
 ```
 
 ## 3. 字段定义
+
+### 3.0 risk（顶层风险结构）
+
+```json
+{
+  "risk_status": "valid",
+  "risk_level": "medium",
+  "risk_factors": [],
+  "invalidation_conditions": [],
+  "stop_loss_enabled": true,
+  "stop_loss_price": 12.10,
+  "stop_loss_exit_ratio": 1.0,
+  "clear_enabled": true,
+  "clear_exit_ratio": 1.0,
+  "human_review_required": false
+}
+```
+
+`risk_status=unavailable` 表示风险数据或模型不可用，不能解释为低风险；止损和清仓退出比例固定为 1.0。
 
 ### 3.1 instrument
 
@@ -162,6 +181,18 @@ Brier Score、AUC、Precision/Recall 和概率校准字段在样本不足或数�
   "sector_effect": "顺风",
   "stance": "支持但等待回踩",
   "suggested_action": "等待买入",
+  "operation_advice": "等待回踩支撑并确认承接后再评估。",
+  "model_output": "模型摘要：技术结构偏强但量能不足；大盘顺风，板块数据未知。当前以持仓保护和支撑确认优先，跌破失效位执行风控。",
+  "next_day_scenario": {
+    "base_case": "围绕短期均线震荡，先观察承接。",
+    "bullish_case": "放量站稳关键价并获得板块共振。",
+    "bearish_case": "跌破支撑且无法快速收回。",
+    "confirmation_signals": [],
+    "invalidation_signals": [],
+    "open_plan": "高开不追，等待回踩确认。",
+    "hold_plan": "已有仓按支撑和板块强度管理。",
+    "exit_plan": "破位并放量时执行减仓或退出。"
+  },
   "facts_used": [],
   "evidence": [
     {

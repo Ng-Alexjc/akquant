@@ -37,6 +37,11 @@ uv.lock
 # ── 本地配置 ──
 .cargo/config.toml
 CLAUDE.md
+/llm_trade.local.yaml
+/review_center_ai.sqlite3
+/review_center_ai.sqlite3-shm
+/review_center_ai.sqlite3-wal
+/review_center_ai_raw/
 
 # ── 本地数据 ──
 /data_catalog/

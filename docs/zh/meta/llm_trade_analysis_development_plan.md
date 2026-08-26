@@ -1,6 +1,10 @@
-# AKQuant 复盘、选股与趋势预测的大模型增强方案（开发前评审稿）
+ # AKQuant 复盘、选股与趋势预测的大模型增强方案
 
-> 状态：仅设计，不代表已实现。
+> 状态：第一阶段已实现并接入本地复盘中心；妙想 MCP 的账号级工具清单与额度仍待配置 `EM_API_KEY` 后现场核验。
+
+> 运行配置变更：当前本机首次接入测试暂切换为 DeepSeek（`deepseek-chat`、Chat Completions 兼容接口）；原已确认的 CodexAPIs 配置仍保留，可通过 `active_provider` 切回。DeepSeek Key 未填写前，LLM 状态为未就绪，传统分析不受影响。
+
+官方指南已核验：用户给出的 `https://choice.eastmoney.com/mcp/guide` 确为“妙想 MCP”官方接入指南；Streamable HTTP 地址为 `https://mxapi.eastmoney.com/mxds/mcp`，认证请求头名称为 `em_api_key`。官网登录后可查看或通过手机验证生成专属 API Key；每日登录赠送积分当日有效、次日 00:00 清零。具体剩余积分、免费赠送数额、计费和账号条款必须登录后读取，代码不得猜测。
 >
 > 本文把当前项目事实、推荐方案与待确认事项分开记录。标为“待确认”的内容在确认前不得进入实现。
 
@@ -8,14 +12,14 @@
 
 本方案在现有复盘中心之上增加一个可审计的大模型分析层，并把传统逻辑、大模型判断、市场环境和个人交易经验统一成最终分析结果。
 
-本轮先完成开发文档，暂不执行以下动作：
+当前实现边界：
 
-- 不调用任何付费模型；
-- 不创建或写入 API Key；
-- 不在本轮安装依赖；用户已授权进入开发后按方案直接安装必要依赖；
 - 不接入实盘下单；
-- 不改变现有评分、预测概率、操作阈值和页面行为；
-- 不把已核实接入方式但尚未完成账号额度、返回结构与历史数据能力验证的妙想 MCP 当成稳定数据源。
+- 模型与妙想密钥只写入 Git 忽略的 `llm_trade.local.yaml`；
+- 妙想只读工具可在获取真实 `tools/list` 后进入白名单，自选写入需再次确认目标组，模拟/真实交易写工具固定禁用；
+- 没有真实数据样本前不伪造模型升级门槛、最小样本量或最优融合权重。
+
+已完成：OpenAI 兼容 Responses/JSON Schema Provider、双周期传统模型、个人知识检索、受限融合、价格/仓位计划、SQLite 观测与反馈、次日/5日路径标签、复盘中心用户勾选调用和三层结果展示。
 
 预期目标：
 
@@ -49,7 +53,7 @@
 | 大盘 | 东方财富报价接口 | 上证指数、创业板指数当日涨跌幅 |
 | 本地票池 | JSON 状态文件 | 观察、持仓、模拟交易 |
 
-当前行情缓存为 90 秒，日 K 请求范围为约 900 个自然日。缓存只存在于进程内。
+当前实现已将行情缓存改为 180 秒，日 K 请求范围改为 360 个自然日。缓存只存在于进程内。
 
 已确认的改造目标：
 
@@ -85,7 +89,7 @@
 - 至少有效样本：30，且标签必须包含两类；
 - 验证集：最后 `min(60, max(20, 样本数 / 5))` 个样本；
 - 当前验证指标：Accuracy；
-- 模型不可用或依赖缺失时，上涨概率当前回退为 `0.5`。
+- 历史版本在模型不可用或依赖缺失时曾回退为 `0.5`；当前实现已改为概率 `null`，并使用 `insufficient_data`/`unavailable` 状态及原因区分“模型不可用”和真实中性。
 
 已知不足：
 
@@ -879,34 +883,33 @@ provider + model + prompt_version + schema_version + knowledge_version
 
 训练与线上推理隔离。每日可以生成候选模型，但只有达到最小样本、完成时间外验证，并在预测指标和交易指标上通过发布门槛后才能升级；否则继续使用当前冠军版本。所有版本必须可重放、可比较、可回滚。
 
-## 12. 计划中的代码模块（未实现）
+## 12. 代码模块与实现状态
 
-建议后续拆分：
+第一阶段已按职责落地到 `python/akquant/llm/`、`scripts/review_center_server.py` 和 `python/akquant/lwc/_template.py`。下表中的模块名是架构职责，不表示仍未实现；尚未实现的训练发布能力单独列为后续项。
+
+当前实现与后续扩展职责：
 
 ```text
 python/akquant/llm/
 ├── config.py              # Provider 和调用配置
-├── client.py              # 统一客户端入口
-├── providers.py           # OpenAI/DeepSeek/Qwen Adapter
-├── prompt_loader.py       # Markdown Prompt 加载与版本哈希
-├── context_builder.py     # 四类输入构建和压缩
+├── provider.py            # OpenAI/DeepSeek/Qwen 兼容 Provider
+├── prompts.py             # Markdown Prompt 加载与版本哈希
+├── service.py             # 四类输入编排、调用与保存
 ├── knowledge.py           # 经验卡片检索
 ├── schemas.py             # 输入、传统、LLM、融合输出模型
 ├── fusion.py              # 确定性融合与冲突处理
-├── cache.py               # 本地缓存和键生成
-├── audit.py               # 响应、Token、版本和数据来源审计
-├── observations.py        # 每日预测时点快照
-├── labels.py              # 到期标签、MAE/MFE 和反馈回填
-├── evaluation.py          # Brier/AUC/Precision/Recall/校准与交易评价
-├── trainer.py             # 校准器和融合 Meta Model 训练
-├── registry.py            # champion/challenger、版本发布和回滚
-└── service.py             # 面向复盘中心的编排服务
+├── storage.py             # 观测、Token、标签、反馈和表现报告
+├── fusion.py              # 确定性融合、价格与仓位计划
+├── traditional.py         # 双周期传统概率、校准与评价指标
+├── knowledge.py           # 个人经验卡片检索
+├── schemas.py             # LLM 与融合输出校验
+└── miaoxiang.py           # 妙想只读/自选权限控制 Adapter
 
-python/akquant/data_sources/
-└── miaoxiang.py           # 可替换的妙想 Adapter：只读数据 + 用户确认的自选管理
+scripts/review_center_server.py  # 行情、票池、API、信号和页面服务
+python/akquant/lwc/_template.py  # 主表、展开明细和最近365天图表
 ```
 
-复盘中心服务应逐步把当前单文件中的数据源、分析、API 和状态管理拆开，但拆分范围需另行确认。
+后续待实现：训练候选模型、champion/challenger 注册、自动发布与回滚，以及历史日期的 LLM 重放回测。复盘中心服务中的部分行情和 API 代码仍集中在单文件中，属于工程拆分优化，不影响当前功能。
 
 ## 13. 预计依赖（已获安装授权，开发时按需安装）
 
@@ -925,7 +928,7 @@ python/akquant/data_sources/
 
 ## 14. 建议顺便完善的现有系统
 
-### P0：开发前必须做
+### P0：已完成（开发前必须项）
 
 - 把所有传统阈值移到版本化配置；
 - 建立 `codexapis` Responses Provider，并完成健康检查、响应字段兼容性和密钥脱敏测试；
@@ -936,7 +939,7 @@ python/akquant/data_sources/
 - 为市场、板块和外部数据增加时间戳与质量标记；
 - 明确 LLM 永不直接下单。
 
-### P1：首版应做
+### P1：已完成或已接入（首版项）
 
 - 分别建立次日和未来 5 个交易日标签/概率，改为 Walk-Forward 评估；
 - 增加 Brier Score、AUC、Precision/Recall 和概率校准报告；
@@ -947,7 +950,7 @@ python/akquant/data_sources/
 - 首版直接启用受限 `rule_adjustment`，配置 70/30、评分 ±10、概率 ±0.08 和一级操作变化上限；
 - 建立 LLM 调用日志、Token、缓存命中和失败原因。
 
-### P2：稳定后再做
+### P2：待真实样本后实施
 
 - 学习融合权重；
 - 建立校准器/融合 Meta Model 的 champion/challenger 训练、发布和回滚；
@@ -994,6 +997,30 @@ python/akquant/data_sources/
 7. **模型发布门槛仍需历史基准**：最小样本量、评价窗口和发布门槛在首批数据积累后确定，不能在没有数据时声称某个阈值最优。
 
 至此，当前开发计划没有必须由用户继续补充的配置项。第 5～7 项属于必须在真实调用、官方工具清单或历史样本出现后才能完成的运行期验证，不阻塞基础框架开发。
+
+### 15.3 实现审计（2026-08-26）
+
+| 需求/技术项 | 状态 | 当前实现或剩余事项 |
+| --- | --- | --- |
+| Provider 配置、GPT/DeepSeek/Qwen 兼容 | 已完成 | `llm_trade.local.yaml` + Responses/Chat Completions Adapter；Key 不进入前端和日志 |
+| 四类上下文、Prompt、个人经验库 | 已完成 | 动态上下文、固定前缀、标签检索和版本哈希已接入 |
+| 持仓明细与传统阈值完整传入 | 已完成 | 传入当前持仓成本/数量/可用数量/现价/市值/收益及全持仓、观察池摘要；附带版本化阈值和触发规则快照 |
+| 妙想个股资料与明日走势预案 | 已完成（可选只读工具） | `mx_ashare_finance_data` 经过白名单审核后注入压缩行情/换手/估值/行业/风险表；Schema 增加 `next_day_scenario`，操作建议同步展示基准/偏强/偏弱预案 |
+| 传统双周期概率与“不可用 ≠ 中性” | 已完成 | 次日/5日分别建模；不可用为 `null` 并保留状态原因 |
+| Brier/AUC/Precision/Recall/校准报告 | 已完成 | `/api/ai/performance` 提供；样本不足返回 `insufficient_data` |
+| 受限融合、硬止损、价格/仓位/退出计划 | 已完成 | 70/30 初始约束、评分 ±10、概率 ±0.08、动作最多一级；止损/清仓 100% |
+| 顶层 `risk` 结构 | 已完成 | Schema 1.3、融合结果、存储审计和前端明细均提供风险状态/等级/因素/止损/清仓字段 |
+| 3 分钟缓存、360 天请求、10 根日 K、最多 3 天分钟 K | 已完成 | 行情层和 LLM 上下文按已确认范围执行；图表另限制显示最近 365 天 |
+| 复盘中心主表与行展开细节 | 已完成 | 主表默认融合结果；展开显示传统分项、LLM 证据/反证/失效条件和融合依据 |
+| 观察信号隐藏 | 已完成 | 交易信号表隐藏最终动作为“观察”的行，观察票池仍保留 |
+| 妙想只读 Adapter 与交易写入禁用 | 已完成 | 已兼容当前 MCP SDK 的 2/3 元组传输返回，核验 `/api/miaoxiang/tools` 的官方工具清单；仅启用 `mx_index_block_finance_data`，交易写工具仍固定禁用 |
+| 板块强度、市场广度、情绪和外部事件 | 部分完成 | 妙想行业/板块行情与 Eastmoney 全市场涨跌列表已接入；外部事件仍需可验证的历史快照数据，缺失时显式 unavailable |
+| 每日自动调度与历史 LLM 重放回测 | 已完成（手动触发） | `/api/ai/daily-run` 批量执行当前持仓/观察池；`/api/ai/replay` 基于原始快照重放，默认不持久化。系统计划任务仍需用户自行配置 |
+| 自动训练、Meta Model、champion/challenger 发布回滚 | 部分完成 | `/api/ai/training` 提供真实标签与指标、样本不足门控；尚未自动训练/发布，不会擅自改权重 |
+| 所有传统阈值外置为可编辑配置 | 部分完成 | 首版阈值仍集中在 `review_center_server.py`，后续再迁移到版本化配置 |
+| Prompt/Schema/经验审计 | 已完成 | 保存完整固定 Prompt、动态输入、输出 Schema 原文及 SHA；修改后重启服务生效 |
+
+因此，“第一阶段基础功能”已完成并可运行；尚未完成的项目集中在妙想账号级验证、完整市场情绪数据、自动调度、历史 LLM 回放和自动训练发布，不应在文档中表述为已经完成。
 
 ## 16. 外部资料
 

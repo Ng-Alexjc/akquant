@@ -116,10 +116,14 @@ python scripts/review_center_server.py --host 127.0.0.1 --port 8765 --root .
 `/api/pools` 获取以下结构化结果：
 
 - `selection_rank` / `selection_score`：20 日动量、MA20/MA60 趋势、RSI 与量能组成的票池排序；
-- `up_probability`：使用最多 360 个历史样本训练的标准化 Logistic Regression 下一日上涨概率；
-- `action`：使用分级阈值产生关注、买入、强势买入、加仓、卖出或观望；候选关注为评分 `60`/概率 `50%`，普通买入为 `65`/`54%`，强势买入为 `72`/`58%`，加仓为 `75`/`60%`；
+- `probabilities`：使用最多 360 个历史样本、扩展式 Walk-Forward 与概率校准，分别输出次日和未来 5 个交易日概率，并报告 Brier、AUC、Precision/Recall；不可用时返回 `null`；
+- `action`：使用本地阈值产生观察、等待买入、买入、加仓、持有、减仓、止损或清仓；
 - `stop_price` / `take_profit_price`：基于 ATR 与百分比下限生成的风险参考价；
 - `execution_signal`：仅在明确买卖/加仓时返回，可直接映射为 `akquant.signal.Signal` 的字段。
+
+配置 `llm_trade.local.yaml` 后，可在交易信号表勾选股票并点击“分析选中”。AI 接口只分析显式选择的票，融合结果使用传统基线 70%、LLM 最大 30%，并限制评分、概率和动作修正幅度。Prompt、输出结构和个人经验均位于 `docs/zh/advanced/`，可直接编辑并通过版本/hash 审计。
+
+复盘中心价格图默认只展示最近 365 个自然日；交易信号表隐藏最终动作为“观察”的行，但观察票池仍保留这些标的。每条需要执行的信号可展开查看传统指标与阈值命中、LLM 的支持/反向证据和失效条件，以及最终融合权重、修正幅度、冲突和硬风控依据。未对该标的运行 LLM 时，明细会明确显示“尚未运行 LLM 分析”，不会用空白或 JSON 误导状态。
 
 例如把明确触发的建议交给 AKQuant 信号入口：
 

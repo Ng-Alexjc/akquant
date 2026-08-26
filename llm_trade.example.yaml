@@ -1,0 +1,91 @@
+version: 1
+active_provider: deepseek
+
+strategy:
+  style: a_share_short_term_trend_swing
+  prediction_horizons: [next_trading_day, next_5_trading_days]
+  analysis_schedule: after_daily_close
+  selection_mode: user_selected_pool
+
+market_data:
+  quote_cache_ttl_seconds: 180
+  daily_k_lookback_calendar_days: 360
+  daily_k_prompt_bars: 10
+  intraday_k:
+    enabled: true
+    interval_policy: adaptive
+    max_coverage_trading_days: 3
+    session_start: "09:30"
+    session_end: refresh_time
+
+providers:
+  codexapis:
+    enabled: true
+    provider_type: openai_compatible
+    api_style: responses
+    url: https://www.codexapis.com/v1
+    sk: ""
+    model: gpt-5.6-luna
+  deepseek:
+    enabled: true
+    provider_type: openai_compatible
+    api_style: chat_completions
+    url: https://api.deepseek.com/v1
+    sk: "${DEEPSEEK_API_KEY}"
+    model: deepseek-chat
+  qwen:
+    enabled: false
+    provider_type: openai_compatible
+    api_style: chat_completions
+    url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    sk: "${DASHSCOPE_API_KEY}"
+    model: qwen-plus
+
+request:
+  timeout_seconds: 60
+  max_retries: 2
+  temperature: 0.1
+  max_output_tokens: 2500
+  stream: false
+
+fusion:
+  mode: rule_adjustment
+  initial_traditional_weight: 0.70
+  initial_llm_max_weight: 0.30
+  llm_score_max_delta: 10
+  probability_max_delta: 0.08
+  max_action_step_change: 1
+
+knowledge:
+  path: docs/zh/advanced/llm_trade_personal_knowledge.md
+  max_retrieved_rules: 8
+
+storage:
+  database_path: review_center_ai.sqlite3
+  raw_directory: review_center_ai_raw
+  raw_normal_days: 30
+  raw_oversized_days: 7
+  oversized_token_threshold: null
+
+miaoxiang:
+  enabled: false
+  url: https://mxapi.eastmoney.com/mxds/mcp
+  em_api_key: ""
+  timeout_seconds: 120
+  allow_read_tools: true
+  # 仅允许已核验的只读板块/行业行情工具；交易写工具始终禁用。
+  read_tool_allowlist:
+    - mx_index_block_finance_data
+    - mx_ashare_finance_data
+  allow_self_select_management: true
+  allow_simulated_trade_writes: false
+  # 妙想个股事实压缩上限；只保留有限表格/行/字段，避免增加 LLM token。
+  stock_max_tables: 6
+  stock_max_rows: 8
+  stock_max_value_chars: 80
+  stock_max_total_chars: 5000
+  # 新闻/公告默认关闭。开启前须将对应只读工具加入 read_tool_allowlist。
+  news_enabled: false
+  news_days: 3
+  news_max_items: 3
+  news_max_chars: 1200
