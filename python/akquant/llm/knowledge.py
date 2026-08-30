@@ -106,14 +106,16 @@ class KnowledgeBase:
         ]
         candidates = [card for card in active if card not in fixed]
 
-        def score(card: KnowledgeCard) -> tuple[int, int, str]:
+        def score(card: KnowledgeCard) -> tuple[int, int, int, str]:
             matches = sum(1 for tag in card.tags if tag.lower() in searchable)
             title_matches = sum(
                 1
                 for token in re.split(r"[、，,\s]+", card.title)
                 if token and token.lower() in searchable
             )
+            relevance = matches + title_matches
             return (
+                1 if relevance > 0 else 0,
                 matches * 20 + title_matches * 5 + card.priority,
                 card.priority,
                 card.card_id,

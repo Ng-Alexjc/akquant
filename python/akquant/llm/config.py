@@ -58,7 +58,12 @@ class RequestConfig(_ConfigModel):
     timeout_seconds: float = Field(default=60.0, gt=0)
     max_retries: int = Field(default=2, ge=0, le=5)
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
-    max_output_tokens: int = Field(default=2500, ge=256)
+    # The structured trade-analysis schema contains several evidence and
+    # scenario arrays.  A 2.5k-token cap can truncate otherwise valid JSON
+    # from compatible providers (notably DeepSeek), resulting in an EOF parse
+    # error and an ``LLM unavailable`` fallback.  Keep enough headroom for the
+    # complete schema while still bounding provider usage.
+    max_output_tokens: int = Field(default=5000, ge=256)
     stream: bool = False
 
 
@@ -73,7 +78,7 @@ class FusionConfig(_ConfigModel):
 
 class KnowledgeConfig(_ConfigModel):
     path: str = "docs/zh/advanced/llm_trade_personal_knowledge.md"
-    max_retrieved_rules: int = Field(default=8, ge=1, le=30)
+    max_retrieved_rules: int = Field(default=12, ge=1, le=30)
 
 
 class StorageConfig(_ConfigModel):

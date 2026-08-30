@@ -112,6 +112,9 @@ class TradeAnalysisService:
                 latency_ms=0,
             )
         provider_result.analysis = _ensure_model_output(provider_result.analysis)
+        provider_result.analysis = _normalize_capital_flow_availability(
+            provider_result.analysis, context
+        )
         provider_result.analysis = _normalize_existing_breaks(
             provider_result.analysis, context
         )
@@ -244,6 +247,31 @@ def _ensure_model_output(analysis: LLMTradeAnalysis) -> LLMTradeAnalysis:
         parts.append(f"失效条件：{analysis.invalidation_conditions[0]}")
     summary = "".join(parts).strip()
     return analysis.model_copy(update={"model_output": summary[:600]})
+
+
+def _normalize_capital_flow_availability(
+    analysis: LLMTradeAnalysis, context: dict[str, Any]
+) -> LLMTradeAnalysis:
+    """Do not report capital flow as missing once a supported category exists."""
+    stock_context = dict(context.get("stock_context") or {})
+    miaoxiang_facts = dict(stock_context.get("miaoxiang_facts") or {})
+    capital_flow = dict(miaoxiang_facts.get("capital_flow") or {})
+    has_flow = bool(
+        capital_flow.get("has_data")
+        or capital_flow.get("status") == "valid"
+        or capital_flow.get("rows")
+    )
+    if not has_flow or not analysis.missing_information:
+        return analysis
+    flow_tokens = ("资金流", "主力资金", "超大单", "大单资金")
+    missing = [
+        item
+        for item in analysis.missing_information
+        if not any(token in item for token in flow_tokens)
+    ]
+    if missing == analysis.missing_information:
+        return analysis
+    return analysis.model_copy(update={"missing_information": missing})
 
 
 def _normalize_existing_breaks(

@@ -28,10 +28,27 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Thread
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from research_pipeline import (  # noqa: E402
+    SIMULATOR_VERSION,
+    build_dataset_bundle,
+    deflated_sharpe_ratio,
+    normalize_series,
+    multi_objective_optimize,
+    persist_artifact,
+    probability_of_backtest_overfitting,
+    purged_walk_forward_optimize,
+    simulate_trend_swing,
+    simulate_strategy,
+    walk_forward_optimize,
+)
 
 EASTMONEY_QUOTE = "https://push2.eastmoney.com/api/qt/stock/get"
 EASTMONEY_KLINE = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -40,6 +57,9 @@ EASTMONEY_TRENDS = "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
 EASTMONEY_CLIST = "https://push2.eastmoney.com/api/qt/clist/get"
 TENCENT_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 STATE_FILE = ".review_center_state.json"
+POOL_CACHE_FILE = ".review_center_pool_cache.json"
+BACKTEST_CACHE_FILE = ".review_center_backtest_cache.json"
+POOL_CACHE_VERSION = 2
 REVIEW_INITIAL_EQUITY = 100000.0
 KLINE_HISTORY_DAYS = 360
 QUOTE_CACHE_TTL_SECONDS = 180.0
@@ -121,10 +141,7 @@ def _portfolio_snapshot(
     """Build an auditable local-account snapshot from the review ledger."""
     initial = REVIEW_INITIAL_EQUITY
     realized = sum(_float(item.get("net_pnl")) for item in state.get("manual_trades") or [])
-    cash = initial
-    for trade in state.get("manual_trades") or []:
-        amount = _float(trade.get("price")) * _float(trade.get("quantity"))
-        cash += amount if str(trade.get("action")).lower() == "sell" else -amount
+    cash = _local_available_cash(state)
     market_value = 0.0
     unknown_positions = 0
     for entry in state.get("positions") or []:
@@ -147,6 +164,21 @@ def _portfolio_snapshot(
         "unknown_position_valuation_count": unknown_positions,
         "source": "local_review_center_state_and_manual_trades",
     }
+
+
+def _local_available_cash(state: dict[str, Any]) -> float:
+    """Return local paper cash, migrating legacy position-only state safely."""
+    explicit = state.get("available_cash")
+    if explicit is not None:
+        return _float(explicit)
+    realized = sum(
+        _float(item.get("net_pnl")) for item in state.get("manual_trades") or []
+    )
+    invested_cost = sum(
+        _float(item.get("entry_price")) * _float(item.get("quantity"))
+        for item in state.get("positions") or []
+    )
+    return REVIEW_INITIAL_EQUITY + realized - invested_cost
 
 
 def _load_llm_package() -> Any:
@@ -412,26 +444,103 @@ def _compact_core_performance(
     }
 
 
+def _capital_flow_category(label: Any) -> str | None:
+    """Map provider-specific labels to the three supported flow categories.
+
+    Choice 妙想 has returned several schemas over time: some responses put the
+    category in the first cell of a row, some in a column name, and some use
+    English/underscore aliases.  We intentionally do not retain medium/small
+    orders or an unqualified generic ``资金流向`` field.
+    """
+    text = _repair_text(label).replace(" ", "").replace("_", "").lower()
+    if not text or any(token in text for token in ("中单", "小单", "散户", "mediumorder", "smallorder")):
+        return None
+    if any(token in text for token in ("超大单", "特大单", "superlarge", "superbig", "superorder")):
+        return "超大单"
+    if any(token in text for token in ("大单", "bigorder", "largeorder", "bigfund", "largefund")):
+        return "大单"
+    if any(token in text for token in ("主力", "mainforce", "mainfund", "mainorder")):
+        return "主力"
+    return None
+
+
+def _capital_flow_values(values: Any, max_value_chars: int) -> list[str]:
+    """Normalize one provider value or value list without dropping numeric zero."""
+    if isinstance(values, (list, tuple)):
+        source = list(values)
+    else:
+        source = [values]
+    result: list[str] = []
+    for value in source[:6]:
+        if value is None:
+            continue
+        text = _repair_text(str(value))[:max_value_chars]
+        if text.strip() and text.strip() not in {"-", "—", "--", "暂无", "无", "未知", "N/A", "nan"}:
+            result.append(text)
+    return result
+
+
 def _extract_capital_flow(payload: dict[str, Any], config: Any) -> dict[str, Any]:
-    """Return only a few money-flow rows from the individual-stock response."""
+    """Keep only main, big-order and super-big-order flow fields.
+
+    The function accepts the usual ``data[].items`` table shape and also
+    tolerates dictionary rows or schemas where the category is encoded in a
+    column name.  Any one of the three categories with a non-empty value is
+    sufficient to mark capital flow as available.
+    """
     rows: list[dict[str, Any]] = []
-    max_chars = min(int(getattr(config, "stock_max_total_chars", 5000)), 900)
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    max_chars = min(int(getattr(config, "stock_max_total_chars", 5000)), 1800)
+    max_value_chars = int(getattr(config, "stock_max_value_chars", 80))
     used = 0
-    for label, values in _mcp_table_pairs(payload):
-        if any(token in label for token in ("市现率", "PCF", "现金净流量")):
-            continue
-        if not any(token in label for token in ("资金流入", "资金净流", "主力", "超大单", "大单")):
-            continue
-        compact_values = [_repair_text(value)[: int(getattr(config, "stock_max_value_chars", 80))] for value in values[:4]]
-        entry = {"metric": label[:80], "values": compact_values}
+    truncated = False
+
+    def add(category: str | None, label: Any, values: Any) -> None:
+        nonlocal used, truncated
+        compact_values = _capital_flow_values(values, max_value_chars)
+        if not category or not compact_values:
+            return
+        metric = _repair_text(label)[:80]
+        key = (category, metric, tuple(compact_values))
+        if key in seen:
+            return
+        entry = {"category": category, "metric": metric, "values": compact_values}
         size = len(json.dumps(entry, ensure_ascii=False))
         if used + size > max_chars:
-            break
+            truncated = True
+            return
+        seen.add(key)
         rows.append(entry)
         used += size
-        if len(rows) >= 6:
-            break
-    return {"status": "valid" if rows else "unavailable", "rows": rows, "truncated": bool(rows and used >= max_chars)}
+
+    for raw_table in list(payload.get("data") or []):
+        if not isinstance(raw_table, dict):
+            continue
+        columns = [_repair_text(value) for value in list(raw_table.get("columns") or [])]
+        raw_items = list(raw_table.get("items") or raw_table.get("rows") or [])
+        for raw_row in raw_items:
+            if isinstance(raw_row, dict):
+                for label, value in raw_row.items():
+                    add(_capital_flow_category(label), label, value)
+                continue
+            if not isinstance(raw_row, list):
+                continue
+            # Row-label schema: ["主力净流入", value, ...]
+            if raw_row:
+                add(_capital_flow_category(raw_row[0]), raw_row[0], raw_row[1:])
+            # Column-labelled schema: [date, main_flow, big_flow, ...]
+            for index, column in enumerate(columns):
+                if index < len(raw_row):
+                    add(_capital_flow_category(column), column, [raw_row[index]])
+
+    categories = list(dict.fromkeys(entry["category"] for entry in rows))
+    return {
+        "status": "valid" if rows else "unavailable",
+        "has_data": bool(rows),
+        "categories": categories,
+        "rows": rows,
+        "truncated": truncated,
+    }
 
 
 def _fetch_miaoxiang_sector(symbol: str, fallback_name: str | None = None) -> dict[str, Any]:
@@ -695,6 +804,18 @@ def _analyze_series(series: dict[str, Any]) -> dict[str, Any]:
     volume5 = _mean(volumes[-5:])
     volume20 = _mean(volumes[-20:])
     volume_ratio = volume5 / volume20 if volume20 else 1.0
+    recent_high20 = max(closes[-20:]) if len(closes) >= 20 else close
+    recent_low20 = min(closes[-20:]) if len(closes) >= 20 else close
+    returns20 = [
+        closes[idx] / closes[idx - 1] - 1.0
+        for idx in range(max(1, len(closes) - 20), len(closes))
+        if closes[idx - 1] > 0
+    ]
+    volatility20 = statistics.pstdev(returns20) if len(returns20) > 1 else 0.0
+    volume_std20 = statistics.pstdev(volumes[-20:]) if len(volumes) >= 20 else 0.0
+    volume_zscore20 = (
+        (volumes[-1] - volume20) / volume_std20 if volume_std20 > 1e-12 else 0.0
+    )
     probability_result = _llm_submodule("traditional").predict_all_horizons(
         closes, volumes
     )
@@ -755,6 +876,11 @@ def _analyze_series(series: dict[str, Any]) -> dict[str, Any]:
         "momentum60": momentum60,
         "rsi14": rsi14,
         "volume_ratio": volume_ratio,
+        "trend_strength": ma20 / ma60 - 1.0 if ma60 else 0.0,
+        "volatility20": volatility20,
+        "breakout20": close / recent_high20 - 1.0 if recent_high20 else 0.0,
+        "pullback20": close / recent_low20 - 1.0 if recent_low20 else 0.0,
+        "volume_zscore20": volume_zscore20,
         "atr14": atr14,
         "resistance_price": resistance_price,
         "support_price": support_price,
@@ -974,6 +1100,11 @@ def _pool_signals(
             "ma60": ma60,
             "rsi14": _float(analysis.get("rsi14")),
             "volume_ratio": _float(analysis.get("volume_ratio")),
+            "trend_strength": _float(analysis.get("trend_strength")),
+            "volatility20": _float(analysis.get("volatility20")),
+            "breakout20": _float(analysis.get("breakout20")),
+            "pullback20": _float(analysis.get("pullback20")),
+            "volume_zscore20": _float(analysis.get("volume_zscore20")),
             "atr14": atr14,
             "trend": analysis.get("trend"),
             "trend_direction": analysis.get("trend_direction"),
@@ -1582,7 +1713,7 @@ def _fetch_miaoxiang_stock(symbol: str, *, refresh: bool = False) -> dict[str, A
         client = _llm_submodule("miaoxiang").MiaoxiangClient(config)
         response = asyncio.run(client.call_tool(
             tool_name,
-            {"query": f"查询{symbol}当前行情、换手率、成交额、主力资金净流入、超大单/大单净流入、估值、所属行业和风险指标"},
+            {"query": f"查询{symbol}当前行情、换手率、成交额、主力/超大单/大单/中单/小单资金净流入及流入流出明细、估值、所属行业和风险指标"},
         ))
         payload = _mcp_json(response) or {}
         tables, truncated = _compact_miaoxiang_tables(payload, config)
@@ -1882,32 +2013,559 @@ def market_indices(refresh: bool = False) -> list[dict[str, Any]]:
 
     def fetch(name: str, secid: str) -> dict[str, Any]:
         try:
-            data = (
-                _get_json(
-                    EASTMONEY_QUOTE,
-                    {"secid": secid, "fields": "f57,f58,f43,f60,f170"},
-                ).get("data")
-                or {}
-            )
+            data = _get_json(
+                EASTMONEY_QUOTE,
+                {"secid": secid, "fields": "f57,f58,f43,f60,f170"},
+            ).get("data") or {}
+            if not data.get("f43") or not data.get("f60"):
+                raise ValueError("东方财富指数报价为空")
             return {
                 "name": name,
                 "symbol": str(data.get("f57") or secid.split(".")[-1]),
                 "current_price": _float(data.get("f43")) / 100.0,
                 "previous_price": _float(data.get("f60")) / 100.0,
                 "change_pct": _float(data.get("f170")) / 100.0,
+                "source": "东方财富",
             }
         except Exception as exc:  # noqa: BLE001 - index failure must not block the review page
-            return {
-                "name": name,
-                "symbol": secid.split(".")[-1],
-                "quote_error": str(exc),
-            }
+            # Eastmoney occasionally closes the TLS connection for index
+            # quotes. Tencent's public K-line endpoint carries the same live
+            # quote in its ``qt`` payload, so use it as a transparent fallback.
+            try:
+                code = secid.split(".")[-1]
+                market = "sh" if secid.startswith("1.") else "sz"
+                payload = _get_json(
+                    TENCENT_KLINE,
+                    {"param": f"{market}{code},day,,,5,qfq"},
+                )
+                block = (payload.get("data") or {}).get(f"{market}{code}") or {}
+                quote = (block.get("qt") or {}).get(f"{market}{code}") or []
+                if len(quote) < 33:
+                    raise ValueError("腾讯指数报价为空")
+                return {
+                    "name": _repair_text(quote[1], name) or name,
+                    "symbol": code,
+                    "current_price": _float(quote[3]),
+                    "previous_price": _float(quote[4]),
+                    "change_pct": _float(quote[32]),
+                    "source": "腾讯",
+                }
+            except Exception as fallback_exc:  # noqa: BLE001
+                return {
+                    "name": name,
+                    "symbol": secid.split(".")[-1],
+                    "quote_error": f"{type(exc).__name__}; fallback {type(fallback_exc).__name__}",
+                }
 
     with ThreadPoolExecutor(max_workers=len(targets)) as executor:
         result = list(executor.map(lambda target: fetch(*target), targets))
     with _MARKET_INDEX_CACHE_LOCK:
         _MARKET_INDEX_CACHE = (now, result)
     return result
+
+
+def _review_baseline_backtest(
+    state: dict[str, Any], *, calendar_days: int = 60
+) -> dict[str, Any]:
+    """Simulate a two-month short-term trend baseline from current pool symbols."""
+    raw_symbols = [
+        str(item.get("symbol") or "")
+        for item in list(state.get("positions") or [])
+        + list(state.get("watchlist") or [])
+        if item.get("symbol")
+    ]
+    symbols = list(dict.fromkeys(_code(value) for value in raw_symbols if _code(value)))
+    if not symbols:
+        return {"status": "insufficient_data", "reason": "当前持仓和观察池没有股票", "trades": [], "equity_curve": []}
+    series_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    errors: dict[str, str] = {}
+    for symbol in symbols:
+        try:
+            candles = list((stock_kline(symbol).get("series") or {}).get("candles") or [])
+            normalized = [
+                {"time": str(row.get("time") or "")[:10], "high": _float(row.get("high")), "low": _float(row.get("low")), "close": _float(row.get("close"))}
+                for row in candles
+                if str(row.get("time") or "") and _float(row.get("close")) > 0
+            ]
+            normalized.sort(key=lambda row: row["time"])
+            if len(normalized) >= 21:
+                series_by_symbol[symbol] = normalized
+            else:
+                errors[symbol] = "日 K 数据不足 21 根"
+        except Exception as exc:  # noqa: BLE001
+            errors[symbol] = type(exc).__name__
+    if not series_by_symbol:
+        return {"status": "insufficient_data", "reason": "没有可用的个股日 K 数据", "errors": errors, "trades": [], "equity_curve": []}
+    dates = sorted({row["time"] for rows in series_by_symbol.values() for row in rows})
+    latest = datetime.strptime(dates[-1], "%Y-%m-%d").date()
+    start = latest - timedelta(days=max(30, int(calendar_days)))
+    dates = [value for value in dates if datetime.strptime(value, "%Y-%m-%d").date() >= start]
+    by_date = {symbol: {row["time"]: row for row in rows} for symbol, rows in series_by_symbol.items()}
+    initial = float(REVIEW_INITIAL_EQUITY)
+    cash = initial
+    holdings: dict[str, dict[str, Any]] = {}
+    trades: list[dict[str, Any]] = []
+    curve: list[dict[str, Any]] = []
+    commission_rate, stamp_tax_rate, slippage_rate = 0.0003, 0.0005, 0.001
+
+    def sell_cost(gross: float) -> float:
+        return max(5.0, gross * commission_rate) + gross * stamp_tax_rate
+
+    for as_of in dates:
+        for symbol in list(holdings):
+            row = by_date[symbol].get(as_of)
+            bars = [item for item in series_by_symbol[symbol] if item["time"] <= as_of]
+            if not row or len(bars) < 21:
+                continue
+            ma20 = sum(item["close"] for item in bars[-20:]) / 20.0
+            momentum20 = row["close"] / bars[-21]["close"] - 1.0 if bars[-21]["close"] > 0 else 0.0
+            if row["close"] >= ma20 and momentum20 >= 0:
+                continue
+            position = holdings.pop(symbol)
+            quantity = int(position["quantity"])
+            execution_price = row["close"] * (1.0 - slippage_rate)
+            gross = execution_price * quantity
+            costs = sell_cost(gross)
+            cash += gross - costs
+            pnl = gross - costs - position["cost"]
+            trades.append({"time": as_of, "symbol": symbol, "action": "sell", "price": round(execution_price, 3), "quantity": quantity, "net_pnl": round(pnl, 2), "fee": round(costs, 2), "reason": "跌破 MA20 或 20 日动量转负"})
+        candidates: list[tuple[float, str, dict[str, Any]]] = []
+        for symbol, rows in series_by_symbol.items():
+            if symbol in holdings:
+                continue
+            row = by_date[symbol].get(as_of)
+            bars = [item for item in rows if item["time"] <= as_of]
+            if not row or len(bars) < 21:
+                continue
+            ma5 = sum(item["close"] for item in bars[-5:]) / 5.0
+            ma20 = sum(item["close"] for item in bars[-20:]) / 20.0
+            momentum20 = row["close"] / bars[-21]["close"] - 1.0 if bars[-21]["close"] > 0 else 0.0
+            if row["close"] > ma5 > ma20 and momentum20 > 0:
+                candidates.append((momentum20, symbol, row))
+        candidates.sort(reverse=True)
+        for _, symbol, row in candidates:
+            if len(holdings) >= 5:
+                break
+            equity_now = cash + sum(by_date[item].get(as_of, {}).get("close", position["price"]) * position["quantity"] for item, position in holdings.items())
+            execution_price = row["close"] * (1.0 + slippage_rate)
+            quantity = int((equity_now * 0.10) / execution_price / 100) * 100
+            gross = execution_price * quantity
+            costs = max(5.0, gross * commission_rate)
+            if quantity <= 0 or cash < gross + costs:
+                continue
+            cash -= gross + costs
+            holdings[symbol] = {"quantity": quantity, "price": execution_price, "cost": gross + costs}
+            trades.append({"time": as_of, "symbol": symbol, "action": "buy", "price": round(execution_price, 3), "quantity": quantity, "net_pnl": 0.0, "fee": round(costs, 2), "reason": "close > MA5 > MA20 且 20 日动量为正"})
+        market_value = sum(by_date[symbol].get(as_of, {}).get("close", position["price"]) * position["quantity"] for symbol, position in holdings.items())
+        curve.append({"time": as_of, "value": round(cash + market_value, 2), "cash": round(cash, 2), "market_value": round(market_value, 2), "position_count": len(holdings)})
+    if not curve:
+        return {"status": "insufficient_data", "reason": "回测窗口没有有效交易日", "errors": errors, "trades": [], "equity_curve": []}
+    peak_for_curve = curve[0]["value"]
+    for point in curve:
+        peak_for_curve = max(peak_for_curve, point["value"])
+        point["drawdown_pct"] = round((point["value"] / peak_for_curve - 1.0) * 100.0, 4) if peak_for_curve else 0.0
+    values = [float(item["value"]) for item in curve]
+    returns = [values[index] / values[index - 1] - 1.0 for index in range(1, len(values)) if values[index - 1] > 0]
+    mean_return = statistics.fmean(returns) if returns else 0.0
+    volatility = statistics.pstdev(returns) if len(returns) > 1 else 0.0
+    downside = [min(value, 0.0) for value in returns]
+    downside_deviation = math.sqrt(statistics.fmean([value * value for value in downside])) if downside else 0.0
+    peak, max_drawdown = values[0], 0.0
+    for value in values:
+        peak = max(peak, value)
+        max_drawdown = min(max_drawdown, value / peak - 1.0 if peak else 0.0)
+    periods = max(1, len(returns))
+    annual_return = (values[-1] / initial) ** (252.0 / periods) - 1.0 if values[-1] > 0 else -1.0
+    sells = [item for item in trades if item["action"] == "sell"]
+    summary = {"initial_equity": round(initial, 2), "final_equity": round(values[-1], 2), "total_return_pct": round((values[-1] / initial - 1.0) * 100.0, 4), "annualized_return_pct": round(annual_return * 100.0, 4), "max_drawdown_pct": round(max_drawdown * 100.0, 4), "sharpe_ratio": round((mean_return / volatility) * math.sqrt(252.0), 4) if volatility > 1e-12 else 0.0, "sortino_ratio": round((mean_return / downside_deviation) * math.sqrt(252.0), 4) if downside_deviation > 1e-12 else 0.0, "calmar_ratio": round(annual_return / abs(max_drawdown), 4) if max_drawdown < -1e-12 else 0.0, "volatility_pct": round(volatility * math.sqrt(252.0) * 100.0, 4), "trade_count": len(trades), "completed_trade_count": len(sells), "win_rate": round(sum(1 for item in sells if item["net_pnl"] > 0) / max(1, len(sells)) * 100.0, 4)}
+    return {"status": "valid", "strategy": "short_term_trend_baseline_v1", "window": {"start": dates[0], "end": dates[-1], "calendar_days": calendar_days}, "symbols": symbols, "errors": errors, "assumptions": {"initial_equity": initial, "entry_weight": 0.10, "max_positions": 5, "commission_rate": commission_rate, "stamp_tax_rate": stamp_tax_rate, "slippage_rate": slippage_rate, "lot_size": 100}, "summary": summary, "equity_curve": curve, "trades": trades}
+
+
+def _research_pool_items(
+    state: dict[str, Any], *, refresh: bool = False
+) -> list[dict[str, Any]]:
+    """Load the current local watchlist/positions for research jobs.
+
+    The local pool is intentionally the only account source. No broker or
+    external account endpoint is consulted.
+    """
+    # A local execution request should be fast and deterministic.  Reuse the
+    # latest pool snapshot when refresh=False instead of hitting every market
+    # data source again.  The cached public payload contains all fields needed
+    # for signal generation (analysis/current_price/execution metadata).
+    if not refresh:
+        cached_path = Path.cwd() / POOL_CACHE_FILE
+        try:
+            cached = json.loads(cached_path.read_text(encoding="utf-8")) if cached_path.exists() else None
+        except Exception:  # noqa: BLE001 - fall back to live loading
+            cached = None
+        if isinstance(cached, dict) and cached.get("_cache_version") == POOL_CACHE_VERSION:
+            cached_items = list(cached.get("positions") or []) + list(cached.get("watchlist") or [])
+            if cached_items:
+                return [dict(item) for item in cached_items if isinstance(item, dict)]
+
+    sources = list(state.get("positions") or []) + list(state.get("watchlist") or [])
+    dedup: dict[str, dict[str, Any]] = {}
+    for item in sources:
+        symbol = _code(str(item.get("symbol") or ""))
+        if symbol:
+            dedup[symbol] = {**item, "symbol": symbol}
+    rendered: list[dict[str, Any]] = []
+    for item in dedup.values():
+        try:
+            quote = stock_kline(item["symbol"], refresh=refresh)
+            series = dict(quote.get("series") or {})
+            rendered.append(
+                {
+                    **item,
+                    **{k: v for k, v in quote.items() if k != "series"},
+                    "_ai_series": series,
+                    "analysis": _analyze_series(series),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - one symbol must not stop a run
+            rendered.append({**item, "quote_error": str(exc)})
+    return rendered
+
+
+def _run_research_action(
+    action: str, state: dict[str, Any], *, calendar_days: int = 60, refresh: bool = True
+) -> dict[str, Any]:
+    """Run a local, auditable research action against the pool ledger."""
+    storage = _get_ai_service().storage
+    if action in {"backtest", "labels", "metrics", "optimize", "full"}:
+        items = _research_pool_items(state, refresh=refresh)
+        series_by_symbol = {
+            str(item.get("symbol")): item.get("_ai_series")
+            for item in items
+            if item.get("symbol") and item.get("_ai_series")
+        }
+        dataset = build_dataset_bundle(series_by_symbol)
+        dataset_meta = {
+            "snapshot": dataset.get("snapshot"),
+            "data_quality": dataset.get("data_quality"),
+            "feature_version": dataset.get("feature_version"),
+            "label_version": dataset.get("label_version"),
+            "feature_names": dataset.get("feature_names", []),
+            "label_names": dataset.get("label_names", []),
+            "row_counts": dataset.get("row_counts", {}),
+        }
+        labeled = 0
+        errors: dict[str, str] = {}
+        if action in {"labels", "full"}:
+            for item in items:
+                symbol = str(item.get("symbol") or "")
+                if item.get("quote_error"):
+                    errors[symbol] = str(item.get("quote_error"))
+                    continue
+                before = len(storage.pending_labels(symbol))
+                _update_outcome_labels(item)
+                after = len(storage.pending_labels(symbol))
+                labeled += max(0, before - after)
+        if action == "labels":
+            result = {"status": "completed", "dataset": dataset_meta, "labeled_count": labeled, "errors": errors}
+            artifact = persist_artifact(Path.cwd() / "research_artifacts", f"labels-{dataset['snapshot']['version']}", result)
+            result["artifact_path"] = artifact
+            return result
+        if action == "metrics":
+            result = {"status": "completed", "dataset": dataset_meta, "performance": storage.performance_report(), "training_dataset": storage.training_dataset_summary()}
+            artifact = persist_artifact(Path.cwd() / "research_artifacts", f"metrics-{dataset['snapshot']['version']}", result)
+            result["artifact_path"] = artifact
+            return result
+        strategies: dict[str, Any] = {}
+        wfo: dict[str, Any] = {}
+        base_params = {
+            "initial_cash": REVIEW_INITIAL_EQUITY,
+            "max_positions": 5,
+            "entry_weight": 0.10,
+            "commission_rate": 0.0003,
+            "stamp_tax_rate": 0.0005,
+            "slippage_rate": 0.001,
+        }
+        param_grid = {
+            "fast_window": [3, 5, 8],
+            "slow_window": [15, 20, 30],
+            "momentum_window": [10, 20],
+        }
+        for strategy_name in ("trend_swing", "breakout_pullback", "momentum_regime"):
+            strategies[strategy_name] = simulate_strategy(series_by_symbol, strategy=strategy_name, **base_params)
+            wfo[strategy_name] = walk_forward_optimize(
+                series_by_symbol,
+                param_grid,
+                strategy=strategy_name,
+                initial_cash=REVIEW_INITIAL_EQUITY,
+                train_bars=120,
+                test_bars=30,
+            )
+        optuna_storage = Path.cwd() / "research_artifacts" / "optuna_trials.sqlite3"
+        optimization = {
+            name: multi_objective_optimize(
+                series_by_symbol,
+                param_grid,
+                strategy=name,
+                initial_cash=REVIEW_INITIAL_EQUITY,
+                max_trials=60,
+                storage_path=optuna_storage,
+                study_name=f"akquant-{SIMULATOR_VERSION}-{dataset['snapshot']['version']}-{name}",
+            )
+            for name in strategies
+        }
+        purged = {
+            name: purged_walk_forward_optimize(
+                series_by_symbol, param_grid, strategy=name,
+                initial_cash=REVIEW_INITIAL_EQUITY, train_bars=120,
+                test_bars=30, purge_bars=5, embargo_bars=2,
+            )
+            for name in strategies
+        }
+        robustness = {}
+        for name, value in strategies.items():
+            summary = value.get("summary") or {}
+            trial_scores = [
+                float(item.get("sharpe_ratio") or 0.0)
+                for item in (optimization[name].get("trials") or [])
+                if item.get("state") == "complete"
+            ]
+            robustness[name] = {
+                "deflated_sharpe_ratio": deflated_sharpe_ratio(float(summary.get("sharpe_ratio") or 0.0), max(1, optimization[name].get("trial_count", 1))),
+                "pbo": probability_of_backtest_overfitting(trial_scores),
+                "purged_walk_forward": {"status": purged[name].get("status"), "summary": purged[name].get("summary", {})},
+            }
+        best_name = max(strategies, key=lambda name: float((strategies[name].get("summary") or {}).get("sharpe_ratio") or -999.0)) if strategies else None
+        if best_name:
+            baseline_model_id = f"champion-baseline-{dataset['snapshot']['version']}"
+            active_champion = storage.active_champion()
+            if active_champion is None or (
+                active_champion.get("model_id") == baseline_model_id
+                and not active_champion.get("published_at")
+            ):
+                storage.register_model(
+                    baseline_model_id,
+                    model_name=best_name, role="champion", status="active_paper",
+                    version=dataset["snapshot"]["version"],
+                    metrics={
+                        **(strategies[best_name].get("summary") or {}),
+                        "simulator_version": SIMULATOR_VERSION,
+                    },
+                )
+            for strategy_name, candidate in optimization.items():
+                candidate_metrics = {
+                    "best": candidate.get("best") or {},
+                    "completed_trial_count": candidate.get("completed_trial_count", 0),
+                    "pruned_trial_count": candidate.get("pruned_trial_count", 0),
+                    "study_name": candidate.get("study_name"),
+                    "storage": candidate.get("storage"),
+                    "simulator_version": SIMULATOR_VERSION,
+                    "cpcv_status": purged[strategy_name].get("status"),
+                    "cpcv": {
+                        "status": purged[strategy_name].get("status"),
+                        "summary": purged[strategy_name].get("summary", {}),
+                        "validation": purged[strategy_name].get("validation", {}),
+                    },
+                    "robustness": robustness[strategy_name],
+                    "pbo": robustness[strategy_name].get("pbo"),
+                }
+                storage.register_model(
+                    f"challenger-{strategy_name}-{dataset['snapshot']['version']}",
+                    model_name=strategy_name, role="challenger", status="evaluated",
+                    version=dataset["snapshot"]["version"], metrics=candidate_metrics,
+                )
+        if action == "optimize":
+            result = {"status": "completed", "dataset": dataset_meta, "optimization": optimization, "purged_walk_forward": purged, "robustness": robustness, "models": storage.list_models()}
+            artifact = persist_artifact(Path.cwd() / "research_artifacts", f"optimize-{dataset['snapshot']['version']}", result)
+            result["artifact_path"] = artifact
+            return result
+        backtest = _review_baseline_backtest(state, calendar_days=calendar_days)
+        (Path.cwd() / BACKTEST_CACHE_FILE).write_text(
+            json.dumps(backtest, ensure_ascii=False, default=str), encoding="utf-8"
+        )
+        backtest["research_strategies"] = {
+            name: {"status": value.get("status"), "summary": value.get("summary", {})}
+            for name, value in strategies.items()
+        }
+        backtest["walk_forward"] = {
+            name: {"status": value.get("status"), "summary": value.get("summary", {}), "window_count": len(value.get("windows", []))}
+            for name, value in wfo.items()
+        }
+        if action == "backtest":
+            result = {"status": "completed", "dataset": dataset_meta, "backtest": backtest, "strategies": strategies, "walk_forward": wfo}
+            artifact = persist_artifact(Path.cwd() / "research_artifacts", f"backtest-{dataset['snapshot']['version']}", result)
+            result["artifact_path"] = artifact
+            return result
+        performance = storage.performance_report()
+        training = storage.train_candidate_models()
+        result = {
+            "status": "completed",
+            "dataset": dataset_meta,
+            "labels": {"labeled_count": labeled, "errors": errors},
+            "backtest": backtest,
+            "strategies": {name: {"summary": value.get("summary", {}), "trade_count": len(value.get("trades", []))} for name, value in strategies.items()},
+            "walk_forward": wfo,
+            "optimization": optimization,
+            "purged_walk_forward": purged,
+            "robustness": robustness,
+            "models": storage.list_models(),
+            "performance": performance,
+            "training": training,
+        }
+        artifact = persist_artifact(Path.cwd() / "research_artifacts", f"full-{dataset['snapshot']['version']}", result)
+        result["artifact_path"] = artifact
+        return result
+    if action == "train":
+        result = storage.train_candidate_models()
+        artifact = persist_artifact(Path.cwd() / "research_artifacts", f"train-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}", result)
+        result["artifact_path"] = artifact
+        return result
+    raise ValueError(f"不支持的研究动作: {action}")
+
+
+def _sector_strength_value(signal: dict[str, Any]) -> float:
+    context = signal.get("sector_context") or signal.get("market_context") or {}
+    raw = context.get("strength") if isinstance(context, dict) else None
+    if raw is None:
+        raw = signal.get("sector_strength")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw or "").lower()
+    return 3.0 if any(token in text for token in ("强", "strong", "hot", "上升")) else (1.0 if any(token in text for token in ("弱", "weak", "冷", "下降")) else 2.0)
+
+
+def _execute_local_signals(
+    state: dict[str, Any], *, refresh: bool = True, automated: bool = False
+) -> dict[str, Any]:
+    """Apply actionable signals to the local simulated ledger only.
+
+    Scheduled automation never asks for interactive confirmation.  It may
+    execute only signals without an explicit model/rule conflict and without
+    a human-review flag.  The manual endpoint keeps its existing explicit
+    confirmation flow and can therefore remain available for operator review.
+    """
+    rendered = _research_pool_items(state, refresh=refresh)
+    signals = _pool_signals(state, rendered)
+    # Exit first; when cash is limited, buy/add orders are ranked by the
+    # requested priority: selection score, upward probability, sector strength.
+    exits = [signal for signal in signals if (signal.get("execution_signal") or {}).get("action") == "sell"]
+    entries = [signal for signal in signals if (signal.get("execution_signal") or {}).get("action") == "buy"]
+    others = [signal for signal in signals if signal not in exits and signal not in entries]
+    entries.sort(key=lambda signal: (_float(signal.get("selection_score")), _float(signal.get("up_probability"), -1.0), _sector_strength_value(signal)), reverse=True)
+    signals = exits + entries + others
+    existing_ids = {
+        str(item.get("source_signal_id") or "")
+        for item in state.get("manual_trades") or []
+    }
+    applied: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    positions = state.setdefault("positions", [])
+    trades = state.setdefault("manual_trades", [])
+    cash = _local_available_cash(state)
+    cash_before = cash
+    for signal in signals:
+        execution = signal.get("execution_signal") or {}
+        signal_id = str(execution.get("signal_id") or "")
+        if not signal_id or signal_id in existing_ids:
+            skipped.append({"symbol": signal.get("symbol"), "reason_code": "not_actionable", "reason": "信号已执行或无可执行信号"})
+            continue
+        symbol = str(execution.get("symbol") or signal.get("symbol") or "")
+        if automated:
+            fusion = signal.get("fusion") or {}
+            conflict_level = str(fusion.get("conflict_level") or "none").lower()
+            human_review_required = bool(
+                fusion.get("human_review_required")
+                or (fusion.get("risk") or {}).get("human_review_required")
+            )
+            if conflict_level != "none":
+                skipped.append(
+                    {
+                        "symbol": symbol,
+                        "name": signal.get("name", symbol),
+                        "reason_code": "signal_conflict",
+                        "reason": f"自动交易已跳过：模型与规则存在 {conflict_level} 冲突",
+                        "conflict_level": conflict_level,
+                    }
+                )
+                continue
+            if human_review_required:
+                skipped.append(
+                    {
+                        "symbol": symbol,
+                        "name": signal.get("name", symbol),
+                        "reason_code": "human_review_required",
+                        "reason": "自动交易已跳过：该信号需要人工复核",
+                    }
+                )
+                continue
+        action = str(execution.get("action") or "").lower()
+        price = _float(execution.get("price"))
+        quantity = _float(execution.get("quantity"))
+        if action not in {"buy", "sell"} or price <= 0 or quantity <= 0:
+            skipped.append({"symbol": symbol, "reason_code": "invalid_signal", "reason": "信号价格或数量无效"})
+            continue
+        position = next((item for item in positions if str(item.get("symbol")) == symbol), None)
+        if action == "sell" and (position is None or _float(position.get("quantity")) < quantity):
+            skipped.append({"symbol": symbol, "reason_code": "position_insufficient", "reason": "卖出数量超过本地持仓"})
+            continue
+        if action == "buy":
+            requested_quantity = quantity
+            affordable_quantity = math.floor(
+                max(0.0, cash) / max(price * 1.0003, 1e-9) / 100
+            ) * 100
+            quantity = min(quantity, float(affordable_quantity))
+            if quantity <= 0:
+                skipped.append(
+                    {
+                        "symbol": symbol,
+                        "reason_code": "insufficient_cash",
+                        "reason": f"本地可用现金 {cash:.2f} 元，不足买入一手（约 {price * 100:.2f} 元）",
+                        "requested_quantity": requested_quantity,
+                        "available_cash": round(cash, 2),
+                        "required_cash": round(price * 100 * 1.0003, 2),
+                    }
+                )
+                continue
+        realized_pnl = 0.0
+        if action == "buy":
+            if position is None:
+                position = {"symbol": symbol, "name": signal.get("name", symbol), "quantity": quantity, "entry_price": price}
+                positions.append(position)
+            else:
+                old_quantity = _float(position.get("quantity"))
+                old_cost = _float(position.get("entry_price"))
+                position["quantity"] = old_quantity + quantity
+                position["entry_price"] = ((old_quantity * old_cost) + quantity * price) / position["quantity"]
+        else:
+            realized_pnl = (price - _float(position.get("entry_price"))) * quantity
+            position["quantity"] = _float(position.get("quantity")) - quantity
+            if position["quantity"] <= 1e-12:
+                positions.remove(position)
+        trade = {
+            "id": f"auto-{len(trades) + 1}",
+            "source_signal_id": signal_id,
+            "symbol": symbol,
+            "name": signal.get("name", symbol),
+            "action": action,
+            "price": price,
+            "quantity": quantity,
+            "net_pnl": realized_pnl,
+            "time": _now_iso(),
+            "source": "scheduled_local_research_signal"
+            if automated
+            else "local_research_signal",
+        }
+        trades.append(trade)
+        cash += -price * quantity if action == "buy" else price * quantity
+        existing_ids.add(signal_id)
+        applied.append(trade)
+    if applied:
+        state["available_cash"] = round(cash, 2)
+    return {
+        "status": "completed",
+        "applied": applied,
+        "skipped": skipped,
+        "signal_count": len(signals),
+        "available_cash_before": round(cash_before, 2),
+        "available_cash_after": round(cash, 2),
+        "automated": automated,
+    }
 
 
 class ReviewCenterHandler(SimpleHTTPRequestHandler):
@@ -1931,6 +2589,14 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
     def state_path(self) -> Path:
         return self.root / STATE_FILE
 
+    @property
+    def pool_cache_path(self) -> Path:
+        return self.root / POOL_CACHE_FILE
+
+    @property
+    def backtest_cache_path(self) -> Path:
+        return self.root / BACKTEST_CACHE_FILE
+
     def _read_state(self) -> dict[str, Any]:
         if not self.state_path.exists():
             return {
@@ -1947,6 +2613,7 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
             "watchlist": list(state.get("watchlist") or []),
             "positions": list(state.get("positions") or []),
             "manual_trades": list(state.get("manual_trades") or []),
+            "available_cash": state.get("available_cash"),
             "initialized": bool(state.get("initialized", False)),
         }
 
@@ -1954,6 +2621,18 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
         self.state_path.write_text(
             json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        self.pool_cache_path.unlink(missing_ok=True)
+        self.backtest_cache_path.unlink(missing_ok=True)
+
+    def _read_json_cache(self, path: Path) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _write_json_cache(self, path: Path, payload: dict[str, Any]) -> None:
+        path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
 
     def _json(self, payload: Any, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1967,6 +2646,21 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
     def _body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+
+    def _serve_signal_center(self) -> None:
+        path = self.root / "signal_center.html"
+        html = path.read_text(encoding="utf-8")
+        html = html.replace(
+            "</body>",
+            '<script src="/signal_center_enhancements.js"></script></body>',
+        )
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _pool_item(self, item: dict[str, Any], refresh: bool = False) -> dict[str, Any]:
         try:
@@ -1991,9 +2685,18 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         try:
+            if parsed.path in {"/signal_center.html", "/signal_center"}:
+                self._serve_signal_center()
+                return
             if parsed.path == "/api/pools":
                 state = self._read_state()
                 refresh = query.get("refresh", [""])[0] in {"1", "true"}
+                if not refresh:
+                    cached_payload = self._read_json_cache(self.pool_cache_path)
+                    if cached_payload is not None and cached_payload.get("_cache_version") == POOL_CACHE_VERSION:
+                        cached_payload["cache"] = {"status": "hit", "source": POOL_CACHE_FILE}
+                        self._json(cached_payload)
+                        return
                 # Quote/K-line requests are independent.  Refreshing them in
                 # parallel keeps the review page responsive as the pools grow.
                 sources = state["watchlist"] + state["positions"]
@@ -2033,8 +2736,7 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                     {key: value for key, value in item.items() if key != "_ai_series"}
                     for item in positions
                 ]
-                self._json(
-                    {
+                response_payload = {
                         "watchlist": public_watchlist,
                         "positions": public_positions,
                         "indices": market_indices(refresh=refresh),
@@ -2046,9 +2748,26 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                         "signals": _pool_signals(state, watchlist + positions),
                         "initialized": state["initialized"],
                         "initial_equity": REVIEW_INITIAL_EQUITY,
+                        "available_cash": round(_local_available_cash(state), 2),
                         "as_of": _now_iso(),
+                        "_cache_version": POOL_CACHE_VERSION,
+                        "cache": {"status": "refreshed" if refresh else "miss"},
                     }
-                )
+                self._write_json_cache(self.pool_cache_path, response_payload)
+                self._json(response_payload)
+                return
+            if parsed.path == "/api/backtest/review-baseline":
+                days = int(query.get("days", ["60"])[0])
+                refresh = query.get("refresh", [""])[0] in {"1", "true"}
+                if not refresh:
+                    cached_backtest = self._read_json_cache(self.backtest_cache_path)
+                    if cached_backtest is not None:
+                        cached_backtest["cache"] = {"status": "hit", "source": BACKTEST_CACHE_FILE}
+                        self._json(cached_backtest)
+                        return
+                backtest_payload = _review_baseline_backtest(self._read_state(), calendar_days=max(30, min(days, 180)))
+                self._write_json_cache(self.backtest_cache_path, backtest_payload)
+                self._json(backtest_payload)
                 return
             if parsed.path == "/api/ai/status":
                 self._json(_get_ai_service().status())
@@ -2062,6 +2781,41 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/ai/training":
                 self._json(_get_ai_service().storage.training_dataset_summary())
+                return
+            if parsed.path == "/api/research/status":
+                storage = _get_ai_service().storage
+                self._json(
+                    {
+                        "pool_source": "local_review_center_state",
+                        "positions": len(self._read_state().get("positions") or []),
+                        "watchlist": len(self._read_state().get("watchlist") or []),
+                        "latest_runs": storage.list_research_runs(limit=10),
+                        "performance": storage.performance_report(),
+                        "training": storage.training_dataset_summary(),
+                    }
+                )
+                return
+            if parsed.path == "/api/research/runs":
+                limit = int(query.get("limit", ["20"])[0])
+                self._json({"items": _get_ai_service().storage.list_research_runs(limit)})
+                return
+            if parsed.path == "/api/models":
+                storage = _get_ai_service().storage
+                self._json(
+                    {
+                        "items": storage.list_models(),
+                        "active_champion": storage.active_champion(),
+                        "release_requests": storage.list_release_requests(),
+                        "releases": storage.list_model_releases(),
+                    }
+                )
+                return
+            if parsed.path == "/api/models/release-gate":
+                model_id = str(query.get("model_id", [""])[0])
+                if not model_id:
+                    self._json({"error": "缺少 model_id"}, status=400)
+                    return
+                self._json(_get_ai_service().storage.evaluate_release_gate(model_id))
                 return
             if parsed.path == "/api/ai/history":
                 symbol = _code(query.get("symbol", [""])[0]) if query.get("symbol") else None
@@ -2120,6 +2874,216 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
             payload = self._body()
             state = self._read_state()
             symbol = _code(str(payload.get("symbol", "")))
+            if self.path == "/api/models/release/request":
+                model_id = str(payload.get("model_id") or "")
+                if not model_id:
+                    self._json({"error": "缺少 model_id"}, status=400)
+                    return
+                try:
+                    result = _get_ai_service().storage.request_model_release(
+                        model_id,
+                        requested_by=str(payload.get("requested_by") or "local_user"),
+                        note=str(payload.get("note") or ""),
+                    )
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, status=400)
+                    return
+                self._json(result)
+                return
+            if self.path == "/api/models/release/approve":
+                try:
+                    result = _get_ai_service().storage.approve_model_release(
+                        str(payload.get("request_id") or ""),
+                        approved_by=str(payload.get("approved_by") or "local_user"),
+                        note=str(payload.get("note") or ""),
+                        force=bool(payload.get("force", False)),
+                    )
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, status=400)
+                    return
+                self._json(result)
+                return
+            if self.path == "/api/models/release/reject":
+                try:
+                    result = _get_ai_service().storage.reject_model_release(
+                        str(payload.get("request_id") or ""),
+                        decided_by=str(payload.get("decided_by") or "local_user"),
+                        note=str(payload.get("note") or ""),
+                    )
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, status=400)
+                    return
+                self._json(result)
+                return
+            if self.path == "/api/models/rollback":
+                try:
+                    result = _get_ai_service().storage.rollback_model_release(
+                        target_model_id=str(payload.get("target_model_id") or "") or None,
+                        actor=str(payload.get("actor") or "local_user"),
+                        note=str(payload.get("note") or ""),
+                    )
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, status=400)
+                    return
+                self._json(result)
+                return
+            if self.path == "/api/research/execute":
+                if not bool(payload.get("confirm")):
+                    preview_state = json.loads(json.dumps(state, ensure_ascii=False))
+                    preview = _execute_local_signals(
+                        preview_state, refresh=bool(payload.get("refresh", False))
+                    )
+                    self._json(
+                        {
+                            "status": "requires_confirmation",
+                            "message": "该操作只会写入本地模拟交易和持仓池；请显式传 confirm=true。",
+                            "preview": preview,
+                        },
+                        status=409,
+                    )
+                    return
+                result = _execute_local_signals(
+                    state, refresh=bool(payload.get("refresh", True))
+                )
+                if result.get("applied"):
+                    state["initialized"] = True
+                    self._write_state(state)
+                self._json(result)
+                return
+            if self.path == "/api/research/run":
+                action = str(payload.get("action") or "full").strip().lower()
+                aliases = {
+                    "backtest": "backtest",
+                    "回测": "backtest",
+                    "labels": "labels",
+                    "label": "labels",
+                    "更新标签": "labels",
+                    "metrics": "metrics",
+                    "指标": "metrics",
+                    "train": "train",
+                    "training": "train",
+                    "训练": "train",
+                    "optimize": "optimize",
+                    "optimization": "optimize",
+                    "优化": "optimize",
+                    "full": "full",
+                    "全部": "full",
+                    "daily_auto": "daily_auto",
+                    "auto": "daily_auto",
+                    "每日自动交易": "daily_auto",
+                }
+                action = aliases.get(action, action)
+                if action not in {"backtest", "labels", "metrics", "train", "optimize", "full", "daily_auto"}:
+                    self._json({"error": f"不支持的研究动作: {action}"}, status=400)
+                    return
+                days = max(30, min(int(payload.get("calendar_days") or 60), 180))
+                storage = _get_ai_service().storage
+                run_id = storage.create_research_run(
+                    action,
+                    {
+                        "calendar_days": days,
+                        "refresh": bool(payload.get("refresh", True)),
+                        "pool_source": "local_review_center_state",
+                        "symbols": [
+                            str(item.get("symbol"))
+                            for item in (state.get("positions") or [])
+                            + (state.get("watchlist") or [])
+                            if item.get("symbol")
+                        ],
+                    },
+                )
+                refresh_research = bool(payload.get("refresh", True))
+
+                def execute_research_job() -> dict[str, Any]:
+                    try:
+                        research_action = "full" if action == "daily_auto" else action
+                        result = _run_research_action(
+                            research_action,
+                            state,
+                            calendar_days=days,
+                            refresh=refresh_research,
+                        )
+                        if action == "daily_auto":
+                            snapshot_end = str(
+                                (result.get("dataset") or {})
+                                .get("snapshot", {})
+                                .get("end")
+                                or ""
+                            )[:10]
+                            local_today = datetime.now().date().isoformat()
+                            if snapshot_end != local_today:
+                                execution = {
+                                    "status": "skipped",
+                                    "reason": "最新行情日期不是今天，疑似周末/节假日或行情未更新",
+                                    "snapshot_end": snapshot_end,
+                                    "local_today": local_today,
+                                    "applied": [],
+                                    "skipped": [],
+                                }
+                            else:
+                                execution = _execute_local_signals(
+                                    state,
+                                    refresh=refresh_research,
+                                    automated=True,
+                                )
+                            if execution.get("applied"):
+                                state["initialized"] = True
+                                self._write_state(state)
+                            result = {
+                                "status": "completed",
+                                "research": result,
+                                "execution": execution,
+                                "mode": "local_paper_only",
+                            }
+                        storage.finish_research_run(
+                            run_id, status="completed", result=result
+                        )
+                        return {"status": "completed", "result": result}
+                    except Exception as exc:  # noqa: BLE001 - auditable failure
+                        storage.finish_research_run(
+                            run_id,
+                            status="failed",
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                        return {"status": "failed", "error": str(exc)}
+
+                if bool(payload.get("background", False)):
+                    Thread(
+                        target=execute_research_job,
+                        name=f"research-{run_id}",
+                        daemon=True,
+                    ).start()
+                    self._json(
+                        {
+                            "run_id": run_id,
+                            "action": action,
+                            "status": "running",
+                            "started_at": _now_iso(),
+                            "background": True,
+                        },
+                        status=202,
+                    )
+                    return
+
+                outcome = execute_research_job()
+                if outcome["status"] == "failed":
+                    self._json(
+                        {
+                            "run_id": run_id,
+                            "action": action,
+                            "error": outcome["error"],
+                        },
+                        status=502,
+                    )
+                else:
+                    self._json(
+                        {
+                            "run_id": run_id,
+                            "action": action,
+                            "result": outcome["result"],
+                        }
+                    )
+                return
             if self.path in {"/api/ai/analyze", "/api/ai/daily-run"}:
                 raw_symbols = list(payload.get("symbols") or [])
                 symbols = list(
@@ -2269,6 +3233,7 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                         ),
                     }
                 )
+                state.pop("available_cash", None)
                 state["initialized"] = True
                 self._write_state(state)
                 self._json({"ok": True})
@@ -2293,7 +3258,14 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                     None,
                 )
                 realized_pnl = 0.0
+                cash = _local_available_cash(state)
                 if action == "buy":
+                    if price * quantity > cash + 1e-9:
+                        self._json(
+                            {"error": f"本地可用现金不足：可用 {cash:.2f} 元"},
+                            status=409,
+                        )
+                        return
                     if position is None:
                         position = {
                             "symbol": symbol,
@@ -2330,6 +3302,12 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                     "time": _now_iso(),
                 }
                 state["manual_trades"].append(trade)
+                state["available_cash"] = round(
+                    cash - price * quantity
+                    if action == "buy"
+                    else cash + price * quantity,
+                    2,
+                )
                 state["initialized"] = True
                 self._write_state(state)
                 self._json({"ok": True, "trade": trade})
@@ -2347,6 +3325,7 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                 if item.get("symbol") == symbol:
                     item["quantity"] = _float(payload.get("quantity"))
                     item["entry_price"] = _float(payload.get("cost"))
+                    state.pop("available_cash", None)
                     state["initialized"] = True
                     self._write_state(state)
                     self._json({"ok": True})
@@ -2368,6 +3347,7 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
             state["positions"] = [
                 item for item in state["positions"] if item.get("symbol") != symbol
             ]
+            state.pop("available_cash", None)
         else:
             self._json({"error": "未知 API"}, status=404)
             return

@@ -45,7 +45,7 @@ request:
   timeout_seconds: 60
   max_retries: 2
   temperature: 0.1
-  max_output_tokens: 2500
+  max_output_tokens: 5000
   stream: false
 
 fusion:
@@ -58,7 +58,7 @@ fusion:
 
 knowledge:
   path: docs/zh/advanced/llm_trade_personal_knowledge.md
-  max_retrieved_rules: 8
+  max_retrieved_rules: 12
 
 storage:
   database_path: review_center_ai.sqlite3

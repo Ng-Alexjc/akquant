@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -176,6 +178,51 @@ def test_knowledge_retrieval_keeps_five_fixed_rules() -> None:
     assert all(item["id"].startswith("RULE-") for item in result["retrieved_rules"])
 
 
+def test_personal_knowledge_v2_retrieves_new_execution_rules() -> None:
+    knowledge = _submodule("knowledge").KnowledgeBase(
+        ROOT / "docs" / "zh" / "advanced" / "llm_trade_personal_knowledge.md"
+    )
+    assert knowledge.version == "2026-08-30.v2"
+    card_ids = [card.card_id for card in knowledge.cards]
+    assert len(card_ids) == len(set(card_ids))
+    active_ids = {card.card_id for card in knowledge.cards if card.status == "active"}
+    expected = {
+        "RULE-ENTRY-105",
+        "RULE-ENTRY-106",
+        "RULE-SECTOR-106",
+        "RULE-SECTOR-107",
+        "RULE-POSITION-106",
+        "RULE-MARKET-102",
+        "RULE-EXEC-103",
+    }
+    assert expected <= active_ids
+
+    open_rules = knowledge.retrieve(
+        {
+            "market_context": "缩量竞价抢筹，等待开盘方向",
+            "sector_context": "中军迟迟不能封板，缺少增量资金",
+            "stock_context": "水下靠近五日线，观察低吸",
+        },
+        12,
+    )["retrieved_rules"]
+    open_ids = {item["id"] for item in open_rules}
+    assert "RULE-ENTRY-102" in open_ids
+    assert "RULE-SECTOR-107" in open_ids
+    assert "RULE-ENTRY-106" in open_ids
+
+    holding_rules = knowledge.retrieve(
+        {
+            "portfolio_context": "长期被套且没有利润垫，反弹先减仓再等买点加回",
+            "market_context": "极弱阴跌，观察次日反馈",
+        },
+        12,
+    )["retrieved_rules"]
+    holding_ids = {item["id"] for item in holding_rules}
+    assert "RULE-POSITION-106" in holding_ids
+    assert "RULE-MARKET-102" in holding_ids
+    assert "RULE-MARKET-101" in holding_ids
+
+
 def test_storage_persists_labels_and_performance(tmp_path: Path) -> None:
     storage = _submodule("storage").AnalysisStorage(
         tmp_path / "ai.sqlite3", tmp_path / "raw"
@@ -214,6 +261,66 @@ def test_storage_persists_labels_and_performance(tmp_path: Path) -> None:
     assert report["next_5_trading_days"]["sample_count"] == 1
 
 
+def test_model_release_approval_snapshot_and_rollback(tmp_path: Path) -> None:
+    storage = _submodule("storage").AnalysisStorage(
+        tmp_path / "release.sqlite3", tmp_path / "raw"
+    )
+    storage.register_model(
+        "champion-v1",
+        model_name="trend_swing",
+        role="champion",
+        status="active_paper",
+        version="v1",
+        metrics={"sharpe_ratio": 0.5, "max_drawdown_pct": -8.0},
+    )
+    storage.register_model(
+        "challenger-v2",
+        model_name="momentum_regime",
+        role="challenger",
+        status="evaluated",
+        version="v2",
+        metrics={
+            "best": {
+                "sharpe_ratio": 0.8,
+                "max_drawdown_pct": -7.0,
+                "trade_count": 20,
+            },
+            "completed_trial_count": 30,
+            "cpcv_status": "valid",
+            "cpcv": {
+                "status": "valid",
+                "summary": {
+                    "mean_test_sharpe": 0.3,
+                    "positive_test_fold_ratio": 0.7,
+                },
+            },
+            "pbo": 0.25,
+        },
+    )
+    request = storage.request_model_release("challenger-v2", note="candidate ready")
+    assert request["gate"]["passed"] is True
+    with pytest.raises(ValueError, match="已有待审批申请"):
+        storage.request_model_release("challenger-v2")
+    with pytest.raises(ValueError, match="只有 Challenger"):
+        storage.request_model_release("champion-v1")
+    assert storage.active_champion()["model_id"] == "champion-v1"
+    with pytest.raises(ValueError, match="历史 Champion"):
+        storage.rollback_model_release(target_model_id="challenger-v2")
+    published = storage.approve_model_release(
+        request["request_id"], approved_by="tester", note="approved"
+    )
+    assert published["previous_model_id"] == "champion-v1"
+    assert storage.active_champion()["model_id"] == "challenger-v2"
+    assert storage.get_model("challenger-v2")["version_snapshot"]
+    rolled_back = storage.rollback_model_release(actor="tester", note="rollback")
+    assert rolled_back["model_id"] == "champion-v1"
+    assert storage.active_champion()["model_id"] == "champion-v1"
+    assert [item["action"] for item in storage.list_model_releases()] == [
+        "rollback",
+        "publish",
+    ]
+
+
 def test_review_template_contains_selected_ai_analysis_and_all_headers() -> None:
     """The review-center table exposes the confirmed unified result columns."""
     path = ROOT / "python" / "akquant" / "lwc" / "_template.py"
@@ -230,6 +337,12 @@ def test_review_template_contains_selected_ai_analysis_and_all_headers() -> None
     assert "signal-detail-panel" in text
     assert "signal-card-list" in text
     assert "尚未对该股票运行 LLM 分析" in text
+
+
+def test_review_center_links_to_model_release_management() -> None:
+    text = (ROOT / "akquant_review_center.html").read_text(encoding="utf-8")
+    assert 'href="model_management.html"' in text
+    assert "模型发布" in text
     assert "模型输出" in text
     for header in (
         "池/持仓",

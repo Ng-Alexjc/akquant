@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AKQuant 前端视觉方案</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      background: #050912;
+      color: #dce8f7;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      overflow-x: hidden;
+    }
+    button { font: inherit; }
+    .chooser {
+      position: sticky; top: 0; z-index: 50;
+      height: 64px; display: flex; align-items: center; gap: 10px;
+      padding: 0 22px; color: #e9f3ff;
+      background: rgba(5, 9, 18, .94); border-bottom: 1px solid #1d2d43;
+      backdrop-filter: blur(12px);
+    }
+    .chooser-brand { display: flex; align-items: center; gap: 10px; margin-right: 20px; font-weight: 800; }
+    .chooser-brand .mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; background: #1479ff; }
+    .chooser button {
+      height: 36px; padding: 0 15px; border: 1px solid #263a55; border-radius: 7px;
+      background: #0d1727; color: #91a5bd; cursor: pointer;
+    }
+    .chooser button.active { color: white; border-color: #2d91ff; background: #12345f; }
+    .chooser-note { margin-left: auto; color: #6f849d; font-size: 12px; }
+    .concept { display: none; min-height: calc(100vh - 64px); }
+    .concept.active { display: block; }
+    .mono { font-variant-numeric: tabular-nums; font-family: "Roboto Mono", "SFMono-Regular", Consolas, monospace; }
+    .positive { color: #ff5364 !important; }
+    .negative { color: #28d398 !important; }
+    .muted { color: var(--muted); }
+    .icon { width: 16px; height: 16px; stroke-width: 1.8; }
+
+    /* Option A */
+    .terminal {
+      --bg: #07101f; --panel: #0d192b; --panel2: #101e32; --line: #20314a;
+      --text: #e7f0fc; --muted: #7890aa; --accent: #28c2ff;
+      min-height: calc(100vh - 64px); background: var(--bg); color: var(--text);
+      display: grid; grid-template-columns: 66px 1fr;
+    }
+    .t-rail { border-right: 1px solid var(--line); padding: 14px 9px; display: flex; flex-direction: column; align-items: center; gap: 9px; }
+    .t-logo { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 8px; background: #0e6de8; margin-bottom: 12px; }
+    .t-nav { width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: #67819d; }
+    .t-nav.active { color: var(--accent); background: #102b42; }
+    .t-rail .bottom { margin-top: auto; }
+    .t-shell { min-width: 0; padding: 0 16px 16px; }
+    .t-topbar { height: 58px; display: flex; align-items: center; gap: 18px; border-bottom: 1px solid var(--line); }
+    .t-title { font-size: 17px; font-weight: 780; letter-spacing: -.02em; }
+    .t-tabs { display: flex; height: 100%; align-items: center; gap: 22px; color: var(--muted); font-size: 13px; }
+    .t-tabs span.active { color: white; position: relative; }
+    .t-tabs span.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: -20px; height: 2px; background: var(--accent); }
+    .t-actions { margin-left: auto; display: flex; gap: 8px; }
+    .t-btn, .t-select { height: 32px; padding: 0 11px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 6px; background: #0c1728; color: #c5d4e6; font-size: 12px; }
+    .t-btn.primary { border-color: #1d8fcc; background: #116896; color: white; }
+    .t-market { display: grid; grid-template-columns: 1fr 1fr auto; align-items: center; gap: 10px; padding: 10px 0; }
+    .market-item { display: flex; align-items: baseline; gap: 9px; font-size: 12px; color: var(--muted); }
+    .market-item b { color: white; font-size: 14px; }
+    .market-time { color: #5f7894; font-size: 11px; }
+    .t-metrics { display: grid; grid-template-columns: repeat(8, 1fr); border: 1px solid var(--line); background: var(--panel); margin-bottom: 10px; }
+    .t-metric { min-width: 0; padding: 11px 13px; border-right: 1px solid var(--line); }
+    .t-metric:last-child { border-right: 0; }
+    .t-metric small { display: block; margin-bottom: 5px; color: var(--muted); font-size: 10px; }
+    .t-metric strong { font-size: 15px; }
+    .t-grid { display: grid; grid-template-columns: minmax(0, 1fr) 322px; gap: 10px; }
+    .t-main { min-width: 0; display: grid; gap: 10px; }
+    .t-side { display: grid; gap: 10px; align-content: start; }
+    .t-panel { border: 1px solid var(--line); background: var(--panel); min-width: 0; }
+    .t-panel-head { height: 42px; display: flex; align-items: center; gap: 10px; padding: 0 13px; border-bottom: 1px solid var(--line); }
+    .t-panel-head h3 { margin: 0; font-size: 13px; }
+    .t-panel-head .hint { margin-left: auto; color: var(--muted); font-size: 10px; }
+    #terminal-chart { height: 480px; }
+    .t-chart-toolbar { display: flex; gap: 14px; padding: 8px 13px 0; font-size: 10px; color: var(--muted); }
+    .t-chart-toolbar b { color: #dbe7f5; }
+    .trade-form { padding: 12px; display: grid; gap: 9px; }
+    .trade-input { height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 5px; background: #091424; color: #d9e5f5; }
+    .trade-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .action-buy, .action-sell { height: 35px; border-radius: 5px; background: transparent; font-weight: 750; }
+    .action-buy { color: #ff6070; border: 1px solid #a63747; }
+    .action-sell { color: #35d9a4; border: 1px solid #247f68; }
+    .detail { padding: 12px; }
+    .detail-symbol { display: flex; align-items: center; gap: 8px; margin-bottom: 13px; }
+    .detail-symbol strong { font-size: 15px; }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px 12px; }
+    .detail-grid small { color: var(--muted); font-size: 10px; display: block; margin-bottom: 3px; }
+    .detail-grid b { font-size: 12px; }
+    .signal-box { padding: 12px; }
+    .signal-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .signal-tag { padding: 3px 7px; border-radius: 4px; background: #3b1721; color: #ff6574; font-size: 10px; }
+    .signal-score { margin-left: auto; color: var(--accent); font-weight: 800; }
+    .signal-text { margin: 0; color: #9cb0c7; font-size: 11px; line-height: 1.6; }
+    .t-bottom-grid { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 10px; }
+    .mini-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+    .mini-table th, .mini-table td { padding: 9px 11px; text-align: right; border-bottom: 1px solid #1c2c42; }
+    .mini-table th:first-child, .mini-table td:first-child { text-align: left; }
+    .mini-table th { color: var(--muted); font-weight: 500; }
+
+    /* Option B */
+    .intel {
+      --bg: #0b1020; --panel: #11182b; --panel2: #151e34; --line: #27314a;
+      --text: #eef2ff; --muted: #8793ab; --blue: #5b8cff; --violet: #8b5cf6;
+      min-height: calc(100vh - 64px); display: grid; grid-template-columns: 220px 1fr;
+      background: var(--bg); color: var(--text);
+    }
+    .i-side { padding: 20px 15px; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+    .i-brand { display: flex; align-items: center; gap: 10px; font-weight: 850; font-size: 16px; margin-bottom: 28px; }
+    .i-brand .mark { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; background: linear-gradient(135deg, #5b8cff, #7c55ed); }
+    .i-menu { display: grid; gap: 5px; }
+    .i-menu div { height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 11px; color: #7f8ba4; border-radius: 7px; font-size: 12px; }
+    .i-menu div.active { color: white; background: #192645; }
+    .health { margin-top: auto; padding: 13px; border: 1px solid #2a3551; background: #121a2d; }
+    .health-head { display: flex; justify-content: space-between; font-size: 11px; color: #97a3b9; }
+    .health-head b { color: #a98aff; }
+    .health-bar { height: 5px; margin: 10px 0; background: #222d45; }
+    .health-bar span { display: block; width: 82%; height: 100%; background: linear-gradient(90deg, #5b8cff, #9c6eff); }
+    .health p { margin: 0; color: #69768e; font-size: 10px; }
+    .i-shell { min-width: 0; padding: 0 18px 18px; }
+    .i-top { height: 62px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+    .i-top h2 { margin: 0; font-size: 17px; }
+    .i-top .sub { color: var(--muted); font-size: 11px; }
+    .i-top-actions { margin-left: auto; display: flex; gap: 8px; }
+    .i-btn { height: 34px; padding: 0 12px; border: 1px solid #33405e; border-radius: 7px; background: #141d31; color: #c9d2e6; font-size: 11px; }
+    .i-btn.primary { color: white; border-color: #6f63f6; background: linear-gradient(90deg, #4d75e8, #7956df); }
+    .brief { margin: 14px 0; display: grid; grid-template-columns: 1.6fr repeat(4, 1fr); border: 1px solid #2a3550; background: #10182a; }
+    .brief-lead { padding: 15px 17px; border-right: 1px solid #2a3550; }
+    .brief-lead small { color: #9aa6bc; font-size: 10px; }
+    .brief-lead h3 { margin: 6px 0 5px; font-size: 17px; }
+    .brief-lead p { margin: 0; color: #78859c; font-size: 10px; }
+    .brief-stat { padding: 15px; border-right: 1px solid #2a3550; }
+    .brief-stat:last-child { border-right: 0; }
+    .brief-stat small { display: block; color: #77839b; font-size: 10px; margin-bottom: 7px; }
+    .brief-stat strong { font-size: 17px; }
+    .i-grid { display: grid; grid-template-columns: minmax(0, 1.58fr) minmax(340px, 1fr); gap: 12px; }
+    .i-card { min-width: 0; border: 1px solid var(--line); background: var(--panel); }
+    .i-card-head { height: 44px; display: flex; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--line); }
+    .i-card-head h3 { margin: 0; font-size: 13px; }
+    .i-card-head .meta { margin-left: auto; color: var(--muted); font-size: 10px; }
+    #intel-chart { height: 408px; }
+    .signal-list { padding: 6px 0; }
+    .signal-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 11px 14px; border-bottom: 1px solid #222d45; }
+    .signal-row:last-child { border-bottom: 0; }
+    .signal-row .name { font-size: 12px; font-weight: 750; }
+    .signal-row .code { margin-left: 6px; color: #68758d; font-size: 10px; }
+    .signal-row .why { margin-top: 5px; color: #77839a; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .signal-row .score { text-align: right; }
+    .signal-row .score b { display: block; font-size: 12px; }
+    .signal-row .score span { color: #6f7d96; font-size: 9px; }
+    .model-note { margin: 10px 12px 12px; padding: 11px; border-left: 3px solid var(--violet); background: #151d33; }
+    .model-note b { font-size: 11px; color: #b8a4ff; }
+    .model-note p { margin: 6px 0 0; color: #8d99af; font-size: 10px; line-height: 1.55; }
+    .i-bottom { margin-top: 12px; }
+    .i-tabs { display: flex; gap: 18px; padding: 0 14px; height: 42px; align-items: center; border-bottom: 1px solid var(--line); color: #77849d; font-size: 11px; }
+    .i-tabs span.active { color: #8faeff; }
+
+    /* Option C */
+    .research {
+      --bg: #f4f7fb; --paper: #ffffff; --ink: #0b1f3a; --muted: #708096;
+      --line: #dce4ee; --blue: #2563eb; --cyan: #0891b2;
+      min-height: calc(100vh - 64px); display: grid; grid-template-columns: 220px 1fr;
+      background: var(--bg); color: var(--ink);
+    }
+    .r-side { padding: 22px 16px; background: #0b1f3a; color: white; display: flex; flex-direction: column; }
+    .r-brand { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 850; margin-bottom: 28px; }
+    .r-brand .mark { width: 31px; height: 31px; display: grid; place-items: center; background: #2563eb; border-radius: 5px; }
+    .r-back { height: 35px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid #294361; color: #b6c6d8; font-size: 11px; margin-bottom: 20px; }
+    .r-outline { display: grid; gap: 4px; }
+    .r-outline div { height: 38px; display: flex; align-items: center; gap: 10px; padding: 0 10px; color: #879bb2; font-size: 12px; border-left: 2px solid transparent; }
+    .r-outline div.active { color: white; background: #122c4c; border-left-color: #4b8cff; }
+    .r-version { margin-top: auto; color: #66809b; font-size: 9px; line-height: 1.6; }
+    .r-main { min-width: 0; padding: 20px 24px 26px; }
+    .r-head { display: flex; align-items: flex-start; gap: 18px; }
+    .r-title small { color: #6f7e90; font-size: 10px; letter-spacing: .08em; }
+    .r-title h2 { margin: 5px 0 6px; font-size: 24px; letter-spacing: -.035em; }
+    .r-title p { margin: 0; color: #718096; font-size: 10px; }
+    .r-actions { margin-left: auto; display: flex; gap: 8px; }
+    .r-btn { height: 34px; padding: 0 13px; border: 1px solid #ccd7e4; border-radius: 5px; background: white; color: #37516f; font-size: 11px; }
+    .r-btn.primary { border-color: #2563eb; background: #2563eb; color: white; }
+    .verdict { margin: 16px 0 12px; padding: 13px 15px; display: flex; align-items: center; gap: 16px; border: 1px solid #cdddeb; border-left: 4px solid #2563eb; background: white; }
+    .verdict .grade { min-width: 58px; font-size: 22px; font-weight: 850; color: #2563eb; }
+    .verdict b { font-size: 12px; }
+    .verdict p { margin: 4px 0 0; color: #748398; font-size: 10px; }
+    .r-metrics { display: grid; grid-template-columns: repeat(6, 1fr); border: 1px solid var(--line); background: white; }
+    .r-metric { padding: 12px 14px; border-right: 1px solid var(--line); }
+    .r-metric:last-child { border-right: 0; }
+    .r-metric small { display: block; color: #7c8b9f; font-size: 9px; margin-bottom: 6px; }
+    .r-metric strong { font-size: 16px; }
+    .r-grid { margin-top: 12px; display: grid; grid-template-columns: minmax(0, 1fr) 275px; gap: 12px; }
+    .r-panel { min-width: 0; border: 1px solid var(--line); background: white; }
+    .r-panel-head { height: 43px; display: flex; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--line); }
+    .r-panel-head h3 { margin: 0; font-size: 12px; }
+    .r-panel-head .legend { margin-left: auto; color: #8190a2; font-size: 9px; }
+    #research-chart { height: 405px; }
+    .findings { padding: 14px; }
+    .finding { padding: 11px 0; border-bottom: 1px solid #e4eaf1; }
+    .finding:last-child { border-bottom: 0; }
+    .finding small { display: block; color: #8492a4; font-size: 9px; margin-bottom: 4px; }
+    .finding b { font-size: 11px; line-height: 1.45; }
+    .r-bottom { margin-top: 12px; display: grid; grid-template-columns: 1.6fr 1fr; gap: 12px; }
+    .heatmap { padding: 13px; display: grid; grid-template-columns: 40px repeat(12, 1fr); gap: 3px; align-items: center; font-size: 8px; text-align: center; color: #728197; }
+    .heatmap .cell { height: 26px; display: grid; place-items: center; color: white; }
+    .heatmap .p1 { background: #f17a84; } .heatmap .p2 { background: #d94455; }
+    .heatmap .n1 { background: #5fb68f; } .heatmap .n2 { background: #197554; }
+    .heatmap .z { background: #e6ebf1; color: #6d7a8c; }
+    .r-tabs { display: grid; grid-template-columns: repeat(3, 1fr); }
+    .r-tab { padding: 16px 12px; border-right: 1px solid var(--line); }
+    .r-tab:last-child { border-right: 0; }
+    .r-tab small { color: #8190a2; font-size: 9px; }
+    .r-tab strong { display: block; margin-top: 7px; font-size: 12px; }
+
+    @media (max-width: 1100px) {
+      .chooser-note { display: none; }
+      .t-metrics, .r-metrics { grid-template-columns: repeat(4, 1fr); }
+      .t-metric:nth-child(4) { border-right: 0; }
+      .t-grid, .r-grid, .i-grid { grid-template-columns: 1fr; }
+      .t-side { grid-template-columns: repeat(3, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="chooser">
+    <div class="chooser-brand"><span class="mark"><i data-lucide="chart-no-axes-combined" class="icon"></i></span>AKQuant 视觉方案</div>
+    <button class="active" data-target="terminal">方案 1 · 深海交易终端</button>
+    <button data-target="intel">方案 2 · 智策研判中台</button>
+    <button data-target="research">方案 3 · 机构研究驾驶舱</button>
+    <span class="chooser-note">点击切换方案 · 当前仅用于风格选型</span>
+  </div>
+
+  <section id="terminal" class="concept active">
+    <div class="terminal">
+      <aside class="t-rail">
+        <div class="t-logo"><i data-lucide="activity" class="icon"></i></div>
+        <button class="t-nav active"><i data-lucide="candlestick-chart" class="icon"></i></button>
+        <button class="t-nav"><i data-lucide="brain-circuit" class="icon"></i></button>
+        <button class="t-nav"><i data-lucide="briefcase-business" class="icon"></i></button>
+        <button class="t-nav"><i data-lucide="list-checks" class="icon"></i></button>
+        <button class="t-nav"><i data-lucide="file-chart-column" class="icon"></i></button>
+        <button class="t-nav bottom"><i data-lucide="settings" class="icon"></i></button>
+      </aside>
+      <main class="t-shell">
+        <header class="t-topbar">
+          <div class="t-title">AKQuant</div>
+          <nav class="t-tabs"><span class="active">复盘中心</span><span>回测报告</span><span>策略监控</span></nav>
+          <div class="t-actions">
+            <button class="t-select">DEMO001 <i data-lucide="chevron-down" class="icon"></i></button>
+            <button class="t-btn"><i data-lucide="rotate-cw" class="icon"></i>刷新</button>
+            <button class="t-btn primary"><i data-lucide="file-chart-column" class="icon"></i>生成报告</button>
+          </div>
+        </header>
+        <div class="t-market">
+          <div class="market-item">上证指数 <b class="mono">3,612.47</b><span class="positive mono">+0.38%</span></div>
+          <div class="market-item">创业板指 <b class="mono">2,431.26</b><span class="negative mono">-0.42%</span></div>
+          <div class="market-time">2026-08-27 14:38:16 · 行情正常</div>
+        </div>
+        <section class="t-metrics">
+          <div class="t-metric"><small>账户权益</small><strong class="mono">¥1,086,420</strong></div>
+          <div class="t-metric"><small>总净盈亏</small><strong class="positive mono">+¥86,420</strong></div>
+          <div class="t-metric"><small>策略收益</small><strong class="positive mono">+8.64%</strong></div>
+          <div class="t-metric"><small>仓位</small><strong class="mono">62.8%</strong></div>
+          <div class="t-metric"><small>交易数</small><strong class="mono">124</strong></div>
+          <div class="t-metric"><small>胜率</small><strong class="mono">56.36%</strong></div>
+          <div class="t-metric"><small>最大回撤</small><strong class="negative mono">-6.21%</strong></div>
+          <div class="t-metric"><small>夏普比率</small><strong class="mono">1.48</strong></div>
+        </section>
+        <div class="t-grid">
+          <div class="t-main">
+            <section class="t-panel">
+              <div class="t-panel-head"><h3>贵州茅台 <span class="muted mono">600519</span></h3><span class="hint">日线 · 前复权 · MA5 / MA10</span><button class="t-btn primary">复盘选中交易</button></div>
+              <div class="t-chart-toolbar"><span>开 <b class="mono">1,462.10</b></span><span>高 <b class="mono">1,481.60</b></span><span>低 <b class="mono">1,451.22</b></span><span>收 <b class="positive mono">1,468.35</b></span><span>量 <b class="mono">3.24万手</b></span></div>
+              <div id="terminal-chart"></div>
+            </section>
+            <div class="t-bottom-grid">
+              <section class="t-panel"><div class="t-panel-head"><h3>持仓票池</h3><span class="hint">6 个标的</span></div><table class="mini-table"><tr><th>标的</th><th>仓位</th><th>持仓盈亏</th></tr><tr><td>贵州茅台</td><td>18.2%</td><td class="positive">+12,430</td></tr><tr><td>宁德时代</td><td>14.7%</td><td class="negative">-3,270</td></tr></table></section>
+              <section class="t-panel"><div class="t-panel-head"><h3>观察票池</h3><span class="hint">12 个标的</span></div><table class="mini-table"><tr><th>标的</th><th>涨跌</th><th>趋势</th></tr><tr><td>五粮液</td><td class="positive">+1.22%</td><td>偏强</td></tr><tr><td>中国平安</td><td class="negative">-0.36%</td><td>震荡</td></tr></table></section>
+              <section class="t-panel"><div class="t-panel-head"><h3>最近交易</h3><span class="hint">共 124 笔</span></div><table class="mini-table"><tr><th>时间</th><th>方向</th><th>盈亏</th></tr><tr><td>08-26 10:21</td><td class="positive">买入</td><td>进行中</td></tr><tr><td>08-21 14:48</td><td class="negative">卖出</td><td class="positive">+4,860</td></tr></table></section>
+            </div>
+          </div>
+          <aside class="t-side">
+            <section class="t-panel"><div class="t-panel-head"><h3>模拟交易</h3><span class="hint">复盘账户</span></div><div class="trade-form"><input class="trade-input" value="贵州茅台 600519" /><div class="trade-row2"><input class="trade-input mono" value="1468.35" /><input class="trade-input mono" value="100" /></div><div class="trade-row2"><button class="action-buy">买入</button><button class="action-sell">卖出</button></div></div></section>
+            <section class="t-panel"><div class="t-panel-head"><h3>交易详情</h3><span class="hint">已定位 K 线</span></div><div class="detail"><div class="detail-symbol"><strong>贵州茅台</strong><span class="signal-tag">买入</span><b class="positive mono">+8.21%</b></div><div class="detail-grid"><div><small>入场</small><b class="mono">1,356.80</b></div><div><small>出场</small><b class="mono">1,468.35</b></div><div><small>MFE</small><b class="positive mono">+11.42%</b></div><div><small>MAE</small><b class="negative mono">-2.18%</b></div><div><small>持仓周期</small><b class="mono">23 日</b></div><div><small>净盈亏</small><b class="positive mono">+11,155</b></div></div></div></section>
+            <section class="t-panel"><div class="t-panel-head"><h3>交易信号</h3><span class="hint">模型已就绪</span></div><div class="signal-box"><div class="signal-top"><span class="signal-tag">建议持有</span><span class="signal-score mono">72 / 100</span></div><p class="signal-text">价格站稳 MA20，短期动量转强。模型次日上涨概率 61%，未触发减仓或止损规则。</p></div></section>
+          </aside>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <section id="intel" class="concept">
+    <div class="intel">
+      <aside class="i-side">
+        <div class="i-brand"><span class="mark"><i data-lucide="brain-circuit" class="icon"></i></span>AKQuant AI</div>
+        <div class="i-menu"><div class="active"><i data-lucide="layout-dashboard" class="icon"></i>今日研判</div><div><i data-lucide="candlestick-chart" class="icon"></i>交易复盘</div><div><i data-lucide="radio-tower" class="icon"></i>信号中心</div><div><i data-lucide="briefcase-business" class="icon"></i>组合与票池</div><div><i data-lucide="file-chart-column" class="icon"></i>回测报告</div><div><i data-lucide="shield-check" class="icon"></i>风险审计</div></div>
+        <div class="health"><div class="health-head"><span>DEMO001 策略健康</span><b class="mono">82/100</b></div><div class="health-bar"><span></span></div><p>数据完整 · 模型在线 · 风控正常</p></div>
+      </aside>
+      <main class="i-shell">
+        <header class="i-top"><div><h2>今日研判</h2><span class="sub">2026年8月27日 · 收盘前策略复核</span></div><div class="i-top-actions"><button class="i-btn">DEMO001</button><button class="i-btn">查看完整回测报告</button><button class="i-btn primary">分析选中信号</button></div></header>
+        <section class="brief"><div class="brief-lead"><small>策略状态摘要</small><h3>趋势温和偏强，等待高置信度机会</h3><p>AI 与传统规则整体一致，1 个持仓出现短期分歧。</p></div><div class="brief-stat"><small>策略健康</small><strong class="mono">82 / 100</strong></div><div class="brief-stat"><small>模型置信度</small><strong class="mono" style="color:#a98aff">68%</strong></div><div class="brief-stat"><small>待复盘信号</small><strong class="mono">3</strong></div><div class="brief-stat"><small>风控状态</small><strong style="color:#29ce93">正常</strong></div></section>
+        <div class="i-grid">
+          <section class="i-card"><div class="i-card-head"><h3>宁德时代 <span class="muted mono">300750</span></h3><span class="meta">日线 · MA5 / MA10 / 成交量 · 当前 232.40</span></div><div id="intel-chart"></div></section>
+          <section class="i-card"><div class="i-card-head"><h3>智能信号队列</h3><span class="meta">按优先级排序</span></div><div class="signal-list"><div class="signal-row"><div><span class="name">贵州茅台</span><span class="code">600519</span><div class="why">规则与模型一致 · 突破 MA20</div></div><div class="score"><b class="positive">买入 76%</b><span>有效至明日收盘</span></div></div><div class="signal-row"><div><span class="name">宁德时代</span><span class="code">300750</span><div class="why">模型偏多，传统规则仍待确认</div></div><div class="score"><b style="color:#f2b94b">观察 68%</b><span>存在分歧</span></div></div><div class="signal-row"><div><span class="name">五粮液</span><span class="code">000858</span><div class="why">动量转弱 · 跌破短期均线</div></div><div class="score"><b class="negative">卖出 72%</b><span>已复盘</span></div></div><div class="signal-row"><div><span class="name">中国平安</span><span class="code">601318</span><div class="why">震荡区间 · 暂无方向优势</div></div><div class="score"><b style="color:#9aa5b9">持有 61%</b><span>今日 14:31</span></div></div></div><div class="model-note"><b>AI 研判 × 传统规则</b><p>宁德时代次日上涨概率 68%，但收盘价尚未稳定站上 MA20。建议观察，不提前触发买入。</p></div></section>
+        </div>
+        <section class="i-card i-bottom"><div class="i-tabs"><span class="active">持仓票池 6</span><span>观察票池 12</span><span>最近交易 124</span><span>账户权益 ¥1,086,420</span><span class="positive">策略收益 +8.64%</span><span>最大回撤 -6.21%</span><span>夏普 1.48</span></div><table class="mini-table"><tr><th>股票</th><th>当前价格</th><th>仓位</th><th>今日涨跌</th><th>持仓收益</th><th>趋势</th><th>模型建议</th></tr><tr><td>贵州茅台 600519</td><td>1,468.35</td><td>18.2%</td><td class="positive">+1.18%</td><td class="positive">+8.21%</td><td>偏强</td><td class="positive">持有</td></tr><tr><td>宁德时代 300750</td><td>232.40</td><td>14.7%</td><td class="negative">-0.42%</td><td class="negative">-1.35%</td><td>震荡</td><td style="color:#f2b94b">观察</td></tr></table></section>
+      </main>
+    </div>
+  </section>
+
+  <section id="research" class="concept">
+    <div class="research">
+      <aside class="r-side"><div class="r-brand"><span class="mark"><i data-lucide="chart-spline" class="icon"></i></span>AKQuant</div><div class="r-back"><i data-lucide="arrow-left" class="icon"></i>返回复盘中心</div><div class="r-outline"><div class="active"><i data-lucide="clipboard-list" class="icon"></i>执行摘要</div><div><i data-lucide="trending-up" class="icon"></i>收益分析</div><div><i data-lucide="shield-alert" class="icon"></i>风险分析</div><div><i data-lucide="repeat-2" class="icon"></i>交易分析</div><div><i data-lucide="network" class="icon"></i>归因与容量</div><div><i data-lucide="scan-search" class="icon"></i>风控审计</div></div><div class="r-version">报告版本 v2.4.0<br/>数据完整性 100%<br/>生成于 2026-08-27 09:42</div></aside>
+      <main class="r-main">
+        <header class="r-head"><div class="r-title"><small>STRATEGY BACKTEST REPORT</small><h2>DEMO001 · 多因子动量策略</h2><p>回测区间 2024-01-02 — 2026-08-26 · 基准 沪深300 · 日频复权数据</p></div><div class="r-actions"><button class="r-btn">刷新数据</button><button class="r-btn primary"><i data-lucide="download" class="icon"></i> 导出报告</button></div></header>
+        <section class="verdict"><div class="grade mono">B+</div><div><b>策略具备进一步样本外验证价值，收益风险比良好，但震荡市稳定性仍需确认。</b><p>累计收益显著跑赢基准；最大回撤处于可接受区间，最近 60 日超额收益有所收敛。</p></div></section>
+        <section class="r-metrics"><div class="r-metric"><small>累计收益</small><strong class="positive mono">+18.42%</strong></div><div class="r-metric"><small>年化收益 CAGR</small><strong class="positive mono">+6.67%</strong></div><div class="r-metric"><small>夏普比率</small><strong class="mono">1.48</strong></div><div class="r-metric"><small>最大回撤</small><strong class="negative mono">-6.21%</strong></div><div class="r-metric"><small>胜率</small><strong class="mono">56.36%</strong></div><div class="r-metric"><small>盈亏比</small><strong class="mono">1.32</strong></div></section>
+        <div class="r-grid"><section class="r-panel"><div class="r-panel-head"><h3>权益、基准与回撤</h3><span class="legend">策略权益 · 沪深300 · 超额收益 · 回撤</span></div><div id="research-chart"></div></section><aside class="r-panel"><div class="r-panel-head"><h3>研究结论</h3><span class="legend">自动摘要</span></div><div class="findings"><div class="finding"><small>核心优势</small><b>收益来源较分散，非单一标的贡献；信息比率为正。</b></div><div class="finding"><small>主要风险</small><b>2025 Q3 回撤修复耗时 46 个交易日，震荡阶段换手偏高。</b></div><div class="finding"><small>稳健性检查</small><b>样本外收益方向一致，参数敏感度中等；容量估算未见明显拥挤。</b></div><div class="finding"><small>下一步建议</small><b>补充交易成本压力测试，并复核高波动区间的风险拒单分布。</b></div></div></aside></div>
+        <div class="r-bottom"><section class="r-panel"><div class="r-panel-head"><h3>月度收益热力图</h3><span class="legend">2026 YTD</span></div><div class="heatmap"><span>月份</span><span>1月</span><span>2月</span><span>3月</span><span>4月</span><span>5月</span><span>6月</span><span>7月</span><span>8月</span><span>9月</span><span>10月</span><span>11月</span><span>12月</span><b>2026</b><span class="cell p1">+1.2</span><span class="cell n1">-0.6</span><span class="cell p2">+2.4</span><span class="cell p1">+0.8</span><span class="cell n2">-1.3</span><span class="cell p1">+1.0</span><span class="cell p2">+1.9</span><span class="cell n1">-0.4</span><span class="cell z">—</span><span class="cell z">—</span><span class="cell z">—</span><span class="cell z">—</span></div></section><section class="r-panel"><div class="r-tabs"><div class="r-tab"><small>交易分析</small><strong>124 笔 · 平均持仓 12.6 日</strong></div><div class="r-tab"><small>归因与容量</small><strong>6 个主要贡献来源</strong></div><div class="r-tab"><small>风控审计</small><strong>3 次拒单 · 0 次强平</strong></div></div></section></div>
+      </main>
+    </div>
+  </section>
+
+  <script>
+    const buttons = document.querySelectorAll('.chooser button[data-target]');
+    const concepts = document.querySelectorAll('.concept');
+    buttons.forEach(button => button.addEventListener('click', () => {
+      buttons.forEach(item => item.classList.remove('active'));
+      concepts.forEach(item => item.classList.remove('active'));
+      button.classList.add('active');
+      document.getElementById(button.dataset.target).classList.add('active');
+      setTimeout(resizeCharts, 20);
+    }));
+    lucide.createIcons();
+
+    const dates = Array.from({ length: 72 }, (_, i) => `2026-${String(Math.floor(i / 24) + 5).padStart(2, '0')}-${String(i % 24 + 1).padStart(2, '0')}`);
+    function makeCandles(base, drift) {
+      let last = base;
+      return dates.map((date, i) => {
+        const wave = Math.sin(i / 5) * 8 + Math.cos(i / 11) * 5;
+        const open = last + Math.sin(i * 1.7) * 3;
+        const close = base + wave + i * drift + Math.sin(i / 2.3) * 4;
+        const high = Math.max(open, close) + 3 + (i % 4);
+        const low = Math.min(open, close) - 3 - (i % 3);
+        last = close;
+        return [date, +open.toFixed(2), +close.toFixed(2), +low.toFixed(2), +high.toFixed(2)];
+      });
+    }
+    function candleOption(data, theme) {
+      const dark = theme === 'dark';
+      return {
+        animation: false,
+        backgroundColor: 'transparent',
+        tooltip: { trigger: 'axis', axisPointer: { type: 'cross' }, backgroundColor: dark ? '#0b1525' : '#fff', borderColor: dark ? '#2a3c55' : '#d8e1eb', textStyle: { color: dark ? '#dbe8f7' : '#263b54', fontSize: 10 } },
+        grid: [{ left: 42, right: 48, top: 24, height: '67%' }, { left: 42, right: 48, top: '76%', height: '15%' }],
+        xAxis: [{ type: 'category', data: data.map(d => d[0]), boundaryGap: true, axisLine: { lineStyle: { color: dark ? '#33445d' : '#d9e2ec' } }, axisLabel: { color: dark ? '#7188a2' : '#7b8999', fontSize: 9, interval: 11 } }, { type: 'category', gridIndex: 1, data: data.map(d => d[0]), axisLine: { lineStyle: { color: dark ? '#33445d' : '#d9e2ec' } }, axisLabel: { show: false } }],
+        yAxis: [{ scale: true, position: 'right', splitLine: { lineStyle: { color: dark ? '#18283c' : '#edf1f5' } }, axisLabel: { color: dark ? '#7890aa' : '#78889b', fontSize: 9 } }, { gridIndex: 1, splitNumber: 2, axisLabel: { show: false }, splitLine: { show: false } }],
+        dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 }],
+        series: [{ type: 'candlestick', data: data.map(d => d.slice(1)), itemStyle: { color: '#ff5364', color0: '#28d398', borderColor: '#ff5364', borderColor0: '#28d398' }, markPoint: { symbolSize: 34, label: { fontSize: 8 }, data: [{ coord: [22, data[22][2]], value: '买', itemStyle: { color: '#d93e51' } }, { coord: [52, data[52][2]], value: '卖', itemStyle: { color: '#168361' } }] } }, { type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: data.map((d, i) => ({ value: 120 + (i * 37) % 240, itemStyle: { color: d[2] >= d[1] ? 'rgba(255,83,100,.72)' : 'rgba(40,211,152,.68)' } })) }]
+      };
+    }
+    const tChart = echarts.init(document.getElementById('terminal-chart'));
+    tChart.setOption(candleOption(makeCandles(1410, .75), 'dark'));
+    const iChart = echarts.init(document.getElementById('intel-chart'));
+    iChart.setOption(candleOption(makeCandles(216, .28), 'dark'));
+    const rChart = echarts.init(document.getElementById('research-chart'));
+    const rDates = Array.from({ length: 32 }, (_, i) => `2024-${String(i + 1).padStart(2, '0')}`);
+    rChart.setOption({ animation: false, tooltip: { trigger: 'axis' }, legend: { top: 8, textStyle: { color: '#718096', fontSize: 9 } }, grid: [{ left: 48, right: 24, top: 43, height: '55%' }, { left: 48, right: 24, top: '72%', height: '16%' }], xAxis: [{ type: 'category', data: rDates, axisLabel: { interval: 5, fontSize: 8, color: '#7d8999' }, axisLine: { lineStyle: { color: '#dbe3ec' } } }, { type: 'category', gridIndex: 1, data: rDates, axisLabel: { show: false }, axisLine: { show: false } }], yAxis: [{ type: 'value', axisLabel: { formatter: '{value}%', fontSize: 8, color: '#7d8999' }, splitLine: { lineStyle: { color: '#edf1f5' } } }, { type: 'value', gridIndex: 1, max: 0, min: -8, axisLabel: { formatter: '{value}%', fontSize: 8, color: '#7d8999' }, splitLine: { lineStyle: { color: '#edf1f5' } } }], series: [{ name: '策略累计收益', type: 'line', showSymbol: false, smooth: true, lineStyle: { width: 2.4, color: '#2563eb' }, areaStyle: { color: 'rgba(37,99,235,.08)' }, data: rDates.map((_, i) => +(Math.sin(i / 4) * 1.7 + i * .61).toFixed(2)) }, { name: '沪深300', type: 'line', showSymbol: false, smooth: true, lineStyle: { width: 1.7, color: '#0891b2' }, data: rDates.map((_, i) => +(Math.sin(i / 4.8) * 1.2 + i * .24).toFixed(2)) }, { name: '最大回撤', type: 'line', xAxisIndex: 1, yAxisIndex: 1, showSymbol: false, lineStyle: { width: 1.4, color: '#138a63' }, areaStyle: { color: 'rgba(19,138,99,.24)' }, data: rDates.map((_, i) => +(-Math.abs(Math.sin(i / 4.1) * 4.7) - (i > 18 ? 1 : 0)).toFixed(2)) }] });
+    function resizeCharts() { tChart.resize(); iChart.resize(); rChart.resize(); }
+    addEventListener('resize', resizeCharts);
+  </script>
+</body>
+</html>

@@ -70,8 +70,85 @@ class AnalysisStorage:
                     note TEXT,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS research_runs (
+                    run_id TEXT PRIMARY KEY,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    params_json TEXT NOT NULL,
+                    result_json TEXT,
+                    error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_runs_time
+                    ON research_runs(started_at DESC);
+                CREATE TABLE IF NOT EXISTS model_registry (
+                    model_id TEXT PRIMARY KEY,
+                    model_name TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    metrics_json TEXT,
+                    artifact_path TEXT,
+                    created_at TEXT NOT NULL,
+                    approved_at TEXT,
+                    approved_by TEXT,
+                    published_at TEXT,
+                    parent_model_id TEXT,
+                    version_snapshot_json TEXT,
+                    release_notes TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_model_registry_role_time
+                    ON model_registry(role, created_at DESC);
+                CREATE TABLE IF NOT EXISTS model_release_requests (
+                    request_id TEXT PRIMARY KEY,
+                    model_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    requested_by TEXT,
+                    request_note TEXT,
+                    decided_at TEXT,
+                    decided_by TEXT,
+                    decision_note TEXT,
+                    gate_json TEXT NOT NULL,
+                    force_override INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_model_release_requests_time
+                    ON model_release_requests(requested_at DESC);
+                CREATE TABLE IF NOT EXISTS model_releases (
+                    release_id TEXT PRIMARY KEY,
+                    action TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    previous_model_id TEXT,
+                    request_id TEXT,
+                    actor TEXT,
+                    note TEXT,
+                    gate_json TEXT,
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_model_releases_time
+                    ON model_releases(created_at DESC);
                 """
             )
+            # Existing local databases predate the release workflow.  SQLite's
+            # additive migration keeps them usable without destructive rebuilds.
+            existing = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(model_registry)").fetchall()
+            }
+            for name, definition in {
+                "approved_at": "TEXT",
+                "approved_by": "TEXT",
+                "published_at": "TEXT",
+                "parent_model_id": "TEXT",
+                "version_snapshot_json": "TEXT",
+                "release_notes": "TEXT",
+            }.items():
+                if name not in existing:
+                    connection.execute(
+                        f"ALTER TABLE model_registry ADD COLUMN {name} {definition}"
+                    )
 
     def save(
         self,
@@ -199,6 +276,529 @@ class AnalysisStorage:
             "release_gate": report.get("release_gate"),
             "policy": "只生成候选评估，不自动修改线上权重；需样本外窗口和人工确认。",
         }
+
+    def create_research_run(self, action: str, params: dict[str, Any]) -> str:
+        """Create an auditable local research run record."""
+        digest = hashlib.sha256(
+            f"{action}|{datetime.now(timezone.utc).isoformat()}".encode("utf-8")
+        ).hexdigest()[:16]
+        run_id = f"research-{digest}"
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO research_runs
+                (run_id,action,status,started_at,params_json)
+                VALUES(?,?,?,?,?)""",
+                (
+                    run_id,
+                    str(action),
+                    "running",
+                    datetime.now(timezone.utc).isoformat(),
+                    json.dumps(params, ensure_ascii=False, default=str),
+                ),
+            )
+        return run_id
+
+    def finish_research_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Finish a research run without changing model weights."""
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE research_runs SET status=?,finished_at=?,result_json=?,error=?
+                WHERE run_id=?""",
+                (
+                    str(status),
+                    datetime.now(timezone.utc).isoformat(),
+                    json.dumps(result, ensure_ascii=False, default=str)
+                    if result is not None
+                    else None,
+                    error,
+                    run_id,
+                ),
+            )
+
+    def list_research_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return recent research runs for the UI."""
+        limit = max(1, min(int(limit), 100))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT run_id,action,status,started_at,finished_at,params_json,
+                result_json,error FROM research_runs ORDER BY started_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            for key in ("params_json", "result_json"):
+                raw = item.pop(key)
+                target = "params" if key == "params_json" else "result"
+                try:
+                    item[target] = json.loads(raw) if raw else None
+                except (TypeError, json.JSONDecodeError):
+                    item[target] = None
+            items.append(item)
+        return items
+
+    def register_model(
+        self,
+        model_id: str,
+        *,
+        model_name: str,
+        role: str,
+        status: str,
+        version: str,
+        metrics: dict[str, Any] | None = None,
+        artifact_path: str | None = None,
+    ) -> None:
+        """Register a champion/challenger without changing live weights."""
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO model_registry
+                (model_id,model_name,role,status,version,metrics_json,artifact_path,created_at)
+                VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(model_id) DO UPDATE SET
+                    model_name=excluded.model_name,
+                    role=CASE WHEN model_registry.status='active_paper' THEN model_registry.role ELSE excluded.role END,
+                    status=CASE WHEN model_registry.status IN ('active_paper','release_requested','approved') THEN model_registry.status ELSE excluded.status END,
+                    version=excluded.version,
+                    metrics_json=excluded.metrics_json,
+                    artifact_path=excluded.artifact_path""",
+                (
+                    model_id,
+                    model_name,
+                    role,
+                    status,
+                    version,
+                    json.dumps(metrics or {}, ensure_ascii=False, default=str),
+                    artifact_path,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def list_models(self, role: str | None = None) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM model_registry WHERE (? IS NULL OR role=?) ORDER BY created_at DESC",
+                (role, role),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metrics"] = json.loads(item.pop("metrics_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                item["metrics"] = {}
+                item.pop("metrics_json", None)
+            try:
+                item["version_snapshot"] = json.loads(
+                    item.pop("version_snapshot_json") or "null"
+                )
+            except (TypeError, json.JSONDecodeError):
+                item["version_snapshot"] = None
+                item.pop("version_snapshot_json", None)
+            result.append(item)
+        return result
+
+    def get_model(self, model_id: str) -> dict[str, Any] | None:
+        return next(
+            (item for item in self.list_models() if item["model_id"] == model_id),
+            None,
+        )
+
+    def active_champion(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT model_id FROM model_registry
+                WHERE role='champion' AND status='active_paper'
+                ORDER BY published_at DESC, created_at DESC LIMIT 1"""
+            ).fetchone()
+        return self.get_model(str(row["model_id"])) if row else None
+
+    @staticmethod
+    def _metric_value(metrics: dict[str, Any], *paths: tuple[str, ...]) -> float | None:
+        for path in paths:
+            value: Any = metrics
+            for key in path:
+                if not isinstance(value, dict):
+                    value = None
+                    break
+                value = value.get(key)
+            if isinstance(value, (int, float)):
+                return float(value)
+        return None
+
+    def evaluate_release_gate(self, model_id: str) -> dict[str, Any]:
+        """Evaluate deterministic publication thresholds for a challenger."""
+        candidate = self.get_model(model_id)
+        if candidate is None:
+            raise ValueError(f"模型不存在: {model_id}")
+        champion = self.active_champion()
+        metrics = dict(candidate.get("metrics") or {})
+        champion_metrics = dict((champion or {}).get("metrics") or {})
+        candidate_sharpe = self._metric_value(metrics, ("sharpe_ratio",), ("best", "sharpe_ratio"))
+        champion_sharpe = self._metric_value(champion_metrics, ("sharpe_ratio",), ("best", "sharpe_ratio"))
+        candidate_drawdown = self._metric_value(metrics, ("max_drawdown_pct",), ("best", "max_drawdown_pct"))
+        champion_drawdown = self._metric_value(champion_metrics, ("max_drawdown_pct",), ("best", "max_drawdown_pct"))
+        completed_trials = self._metric_value(metrics, ("completed_trial_count",), ("optimization", "completed_trial_count")) or 0.0
+        trade_count = self._metric_value(metrics, ("trade_count",), ("best", "trade_count")) or 0.0
+        cpcv_status = str(metrics.get("cpcv_status") or (metrics.get("cpcv") or {}).get("status") or "unavailable")
+        mean_test_sharpe = self._metric_value(metrics, ("mean_test_sharpe",), ("cpcv", "summary", "mean_test_sharpe"))
+        positive_fold_ratio = self._metric_value(metrics, ("positive_test_fold_ratio",), ("cpcv", "summary", "positive_test_fold_ratio"))
+        pbo = self._metric_value(metrics, ("pbo",), ("robustness", "pbo"))
+        checks = [
+            {"name": "challenger_role", "passed": candidate.get("role") == "challenger", "actual": candidate.get("role"), "required": "challenger"},
+            {"name": "evaluated_status", "passed": candidate.get("status") in {"evaluated", "release_requested", "approved"}, "actual": candidate.get("status"), "required": "evaluated/release_requested/approved"},
+            {"name": "optuna_trials", "passed": completed_trials >= 10, "actual": completed_trials, "required": ">=10"},
+            {"name": "minimum_trades", "passed": trade_count >= 3, "actual": trade_count, "required": ">=3"},
+            {"name": "cpcv_valid", "passed": cpcv_status == "valid", "actual": cpcv_status, "required": "valid"},
+            {"name": "cpcv_mean_sharpe", "passed": mean_test_sharpe is not None and mean_test_sharpe >= 0.0, "actual": mean_test_sharpe, "required": ">=0"},
+            {"name": "positive_fold_ratio", "passed": positive_fold_ratio is not None and positive_fold_ratio >= 0.5, "actual": positive_fold_ratio, "required": ">=0.5"},
+            {"name": "pbo", "passed": pbo is not None and pbo <= 0.5, "actual": pbo, "required": "<=0.5"},
+            {"name": "champion_sharpe", "passed": champion_sharpe is None or (candidate_sharpe is not None and candidate_sharpe >= champion_sharpe - 0.10), "actual": candidate_sharpe, "required": f">={champion_sharpe - 0.10:.4f}" if champion_sharpe is not None else "baseline unavailable"},
+            {"name": "champion_drawdown", "passed": champion_drawdown is None or (candidate_drawdown is not None and candidate_drawdown >= champion_drawdown - 3.0), "actual": candidate_drawdown, "required": f">={champion_drawdown - 3.0:.4f}" if champion_drawdown is not None else "baseline unavailable"},
+        ]
+        return {"model_id": model_id, "champion_model_id": (champion or {}).get("model_id"), "passed": all(bool(item["passed"]) for item in checks), "checks": checks, "evaluated_at": datetime.now(timezone.utc).isoformat()}
+
+    def request_model_release(self, model_id: str, *, requested_by: str = "local_user", note: str = "") -> dict[str, Any]:
+        candidate = self.get_model(model_id)
+        if candidate is None:
+            raise ValueError(f"模型不存在: {model_id}")
+        if candidate.get("role") != "challenger":
+            raise ValueError("只有 Challenger 可以发起发布申请")
+        if candidate.get("status") not in {"evaluated", "release_requested"}:
+            raise ValueError(f"模型当前状态不能申请发布: {candidate.get('status')}")
+        with self._connect() as connection:
+            pending = connection.execute(
+                "SELECT request_id FROM model_release_requests WHERE model_id=? AND status='pending' LIMIT 1",
+                (model_id,),
+            ).fetchone()
+        if pending is not None:
+            raise ValueError(f"该模型已有待审批申请: {pending['request_id']}")
+        gate = self.evaluate_release_gate(model_id)
+        request_id = "release-request-" + hashlib.sha256(f"{model_id}|{datetime.now(timezone.utc).isoformat()}".encode("utf-8")).hexdigest()[:16]
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute("UPDATE model_registry SET status='release_requested' WHERE model_id=?", (model_id,))
+            connection.execute(
+                """INSERT INTO model_release_requests
+                (request_id,model_id,status,requested_at,requested_by,request_note,gate_json)
+                VALUES (?,?,?,?,?,?,?)""",
+                (request_id, model_id, "pending", now, requested_by, note, json.dumps(gate, ensure_ascii=False)),
+            )
+        return {"request_id": request_id, "status": "pending", "gate": gate}
+
+    def list_release_requests(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM model_release_requests ORDER BY requested_at DESC LIMIT ?", (max(1, min(int(limit), 500)),)).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["gate"] = json.loads(item.pop("gate_json") or "{}")
+            item["force_override"] = bool(item.get("force_override"))
+            items.append(item)
+        return items
+
+    def approve_model_release(
+        self,
+        request_id: str,
+        *,
+        approved_by: str = "local_user",
+        note: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            request = connection.execute("SELECT * FROM model_release_requests WHERE request_id=?", (request_id,)).fetchone()
+        if request is None:
+            raise ValueError(f"发布申请不存在: {request_id}")
+        if request["status"] != "pending":
+            raise ValueError(f"发布申请不是待审批状态: {request['status']}")
+        model_id = str(request["model_id"])
+        candidate = self.get_model(model_id)
+        if candidate is None or candidate.get("role") != "challenger":
+            raise ValueError("发布对象已不再是可发布的 Challenger")
+        gate = self.evaluate_release_gate(model_id)
+        if not gate["passed"] and not force:
+            raise ValueError("发布门槛未通过，不能批准")
+        if force and not note.strip():
+            raise ValueError("强制发布必须填写审批说明")
+        now = datetime.now(timezone.utc).isoformat()
+        release_id = "release-" + hashlib.sha256(f"publish|{model_id}|{now}".encode("utf-8")).hexdigest()[:16]
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM model_registry ORDER BY created_at").fetchall()
+            snapshot = [dict(row) for row in rows]
+            previous = connection.execute(
+                """SELECT model_id FROM model_registry
+                WHERE role='champion' AND status='active_paper'
+                ORDER BY published_at DESC,created_at DESC LIMIT 1"""
+            ).fetchone()
+            previous_id = str(previous["model_id"]) if previous and previous["model_id"] != model_id else None
+            if previous_id:
+                connection.execute("UPDATE model_registry SET role='archived',status='superseded' WHERE model_id=?", (previous_id,))
+            connection.execute(
+                """UPDATE model_registry SET role='champion',status='active_paper',
+                approved_at=?,approved_by=?,published_at=?,parent_model_id=?,
+                version_snapshot_json=?,release_notes=? WHERE model_id=?""",
+                (now, approved_by, now, previous_id, json.dumps(snapshot, ensure_ascii=False, default=str), note, model_id),
+            )
+            connection.execute(
+                """UPDATE model_release_requests SET status='approved',decided_at=?,
+                decided_by=?,decision_note=?,gate_json=?,force_override=? WHERE request_id=?""",
+                (now, approved_by, note, json.dumps(gate, ensure_ascii=False), int(force), request_id),
+            )
+            connection.execute(
+                """INSERT INTO model_releases
+                (release_id,action,model_id,previous_model_id,request_id,actor,note,gate_json,snapshot_json,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (release_id, "publish", model_id, previous_id, request_id, approved_by, note, json.dumps(gate, ensure_ascii=False), json.dumps(snapshot, ensure_ascii=False, default=str), now),
+            )
+        return {"release_id": release_id, "model_id": model_id, "previous_model_id": previous_id, "status": "published", "gate": gate, "force_override": force}
+
+    def reject_model_release(self, request_id: str, *, decided_by: str = "local_user", note: str = "") -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            request = connection.execute("SELECT model_id,status FROM model_release_requests WHERE request_id=?", (request_id,)).fetchone()
+            if request is None or request["status"] != "pending":
+                raise ValueError("发布申请不存在或已处理")
+            connection.execute(
+                """UPDATE model_release_requests SET status='rejected',decided_at=?,
+                decided_by=?,decision_note=? WHERE request_id=?""",
+                (now, decided_by, note, request_id),
+            )
+            connection.execute("UPDATE model_registry SET status='evaluated' WHERE model_id=?", (request["model_id"],))
+        return {"request_id": request_id, "status": "rejected"}
+
+    def rollback_model_release(
+        self,
+        *,
+        target_model_id: str | None = None,
+        actor: str = "local_user",
+        note: str = "",
+    ) -> dict[str, Any]:
+        current = self.active_champion()
+        if current is None:
+            raise ValueError("当前没有已发布 Champion")
+        if target_model_id is None:
+            target_model_id = str(current.get("parent_model_id") or "")
+        target = self.get_model(target_model_id) if target_model_id else None
+        if target is None:
+            raise ValueError("没有可回滚的目标版本")
+        if target_model_id == current["model_id"]:
+            raise ValueError("目标版本已经是当前 Champion")
+        if target.get("role") != "archived" or target.get("status") not in {
+            "superseded",
+            "rolled_back",
+        }:
+            raise ValueError("回滚目标必须是曾经发布过的历史 Champion")
+        now = datetime.now(timezone.utc).isoformat()
+        release_id = "release-" + hashlib.sha256(f"rollback|{target_model_id}|{now}".encode("utf-8")).hexdigest()[:16]
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM model_registry ORDER BY created_at").fetchall()
+            snapshot = [dict(row) for row in rows]
+            connection.execute("UPDATE model_registry SET role='archived',status='rolled_back' WHERE model_id=?", (current["model_id"],))
+            connection.execute(
+                """UPDATE model_registry SET role='champion',status='active_paper',
+                published_at=?,parent_model_id=?,release_notes=? WHERE model_id=?""",
+                (
+                    now,
+                    current["model_id"],
+                    note or f"rollback from {current['model_id']}",
+                    target_model_id,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO model_releases
+                (release_id,action,model_id,previous_model_id,actor,note,snapshot_json,created_at)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (release_id, "rollback", target_model_id, current["model_id"], actor, note, json.dumps(snapshot, ensure_ascii=False, default=str), now),
+            )
+        return {"release_id": release_id, "status": "rolled_back", "model_id": target_model_id, "previous_model_id": current["model_id"]}
+
+    def list_model_releases(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM model_releases ORDER BY created_at DESC LIMIT ?", (max(1, min(int(limit), 500)),)).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            for source, target in (("gate_json", "gate"), ("snapshot_json", "snapshot")):
+                raw = item.pop(source)
+                item[target] = json.loads(raw) if raw else None
+            items.append(item)
+        return items
+
+    def train_candidate_models(self, minimum_samples: int = 30) -> dict[str, Any]:
+        """Evaluate lightweight challenger models on labeled AI observations.
+
+        This method deliberately produces candidate metrics and an artifact only;
+        it never changes the active model or fusion weights.
+        """
+        try:
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.metrics import (
+                accuracy_score,
+                brier_score_loss,
+                log_loss,
+                precision_score,
+                roc_auc_score,
+            )
+            from sklearn.ensemble import HistGradientBoostingClassifier
+            from sklearn.calibration import CalibratedClassifierCV
+            from sklearn.pipeline import Pipeline
+            from sklearn.preprocessing import StandardScaler
+        except Exception as exc:  # pragma: no cover - optional dependency
+            return {"status": "unavailable", "reason": str(exc)}
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT a.as_of,a.compact_json,o.next_day_label,o.day5_label
+                FROM analyses a JOIN outcome_labels o ON o.analysis_id=a.analysis_id
+                WHERE o.next_day_label IS NOT NULL OR o.day5_label IS NOT NULL
+                ORDER BY a.as_of"""
+            ).fetchall()
+
+        feature_names = [
+            "traditional_score",
+            "traditional_next_day_probability",
+            "traditional_five_day_probability",
+            "next_day_probability_missing",
+            "five_day_probability_missing",
+            "fusion_score",
+            "data_quality",
+            "meta_signal",
+        ]
+
+        def build_rows(label_key: str) -> tuple[list[list[float]], list[int]]:
+            features: list[list[float]] = []
+            labels: list[int] = []
+            for row in rows:
+                label = row[label_key]
+                if label is None:
+                    continue
+                try:
+                    result = json.loads(row["compact_json"])
+                    traditional = result.get("traditional") or {}
+                    fusion = result.get("fusion") or {}
+                    probs = traditional.get("probabilities") or {}
+                    next_prob = (probs.get("next_trading_day") or {}).get("value")
+                    five_prob = (probs.get("next_5_trading_days") or {}).get("value")
+                    quality = (result.get("data_quality") or {}).get("score", 0)
+                    next_missing = 1.0 if next_prob is None else 0.0
+                    five_missing = 1.0 if five_prob is None else 0.0
+                    features.append(
+                        [
+                            float(traditional.get("selection_score") or 0),
+                            float(next_prob) if next_prob is not None else 0.5,
+                            float(five_prob) if five_prob is not None else 0.5,
+                            next_missing,
+                            five_missing,
+                            float(fusion.get("final_score") or 0),
+                            float(quality or 0) / 100.0,
+                            1.0 if float(traditional.get("selection_score") or 0) >= 60.0 else 0.0,
+                        ]
+                    )
+                    labels.append(int(label))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            return features, labels
+
+        output: dict[str, Any] = {"status": "insufficient_data", "models": {}}
+        for horizon, label_key in (
+            ("next_trading_day", "next_day_label"),
+            ("next_5_trading_days", "day5_label"),
+        ):
+            features, labels = build_rows(label_key)
+            if len(labels) < minimum_samples or len(set(labels)) < 2:
+                output["models"][horizon] = {
+                    "status": "insufficient_data",
+                    "sample_count": len(labels),
+                }
+                continue
+            split = max(1, int(len(labels) * 0.8))
+            if split >= len(labels):
+                split = len(labels) - 1
+            if len(set(labels[:split])) < 2:
+                output["models"][horizon] = {
+                    "status": "insufficient_data",
+                    "sample_count": len(labels),
+                    "reason": "训练窗口只包含单一类别",
+                }
+                continue
+            baseline = Pipeline(
+                [
+                    ("scale", StandardScaler()),
+                    ("model", LogisticRegression(max_iter=500, random_state=0)),
+                ]
+            )
+            expected = labels[split:]
+            train_x, test_x = features[:split], features[split:]
+
+            def evaluate(model: Any, model_name: str, calibration_method: str = "none") -> dict[str, Any]:
+                model.fit(train_x, labels[:split])
+                probabilities = model.predict_proba(test_x)[:, 1]
+                predicted = (probabilities >= 0.5).astype(int)
+                k = max(1, int(len(probabilities) * 0.2))
+                top_k = sorted(range(len(probabilities)), key=lambda idx: probabilities[idx], reverse=True)[:k]
+                precision_at_k = float(sum(expected[idx] for idx in top_k) / k) if top_k else 0.0
+                bins = []
+                for lower in (0.0, 0.2, 0.4, 0.6, 0.8):
+                    members = [idx for idx, prob in enumerate(probabilities) if lower <= prob < lower + 0.2 or (lower == 0.8 and prob <= 1.0)]
+                    if members:
+                        bins.append(abs(float(sum(probabilities[idx] for idx in members) / len(members)) - float(sum(expected[idx] for idx in members) / len(members))))
+                importance: dict[str, float] = {}
+                raw_model = model.named_steps.get("model") if hasattr(model, "named_steps") else model
+                if hasattr(raw_model, "coef_"):
+                    importance = {name: float(value) for name, value in zip(feature_names, raw_model.coef_[0])}
+                elif hasattr(raw_model, "feature_importances_"):
+                    importance = {name: float(value) for name, value in zip(feature_names, raw_model.feature_importances_)}
+                return {
+                    "status": "candidate",
+                    "model_name": model_name,
+                    "calibration_method": calibration_method,
+                    "sample_count": len(labels),
+                    "train_count": split,
+                    "test_count": len(expected),
+                    "accuracy": float(accuracy_score(expected, predicted)),
+                    "brier_score": float(brier_score_loss(expected, probabilities)),
+                    "log_loss": float(log_loss(expected, probabilities, labels=[0, 1])),
+                    "auc": float(roc_auc_score(expected, probabilities)) if len(set(expected)) > 1 else None,
+                    "precision_at_k": precision_at_k,
+                    "precision": float(precision_score(expected, predicted, zero_division=0)),
+                    "calibration_error": float(sum(bins) / len(bins)) if bins else None,
+                    "feature_names": feature_names,
+                    "feature_importance": importance,
+                }
+
+            models: dict[str, Any] = {}
+            models["logistic"] = evaluate(baseline, "logistic")
+            try:
+                gb = HistGradientBoostingClassifier(max_iter=120, learning_rate=0.05, max_leaf_nodes=15, random_state=0)
+                models["gradient_boosting"] = evaluate(gb, "hist_gradient_boosting")
+                try:
+                    calibrated = CalibratedClassifierCV(baseline, method="sigmoid", cv=3)
+                    models["logistic_calibrated"] = evaluate(calibrated, "logistic", "platt_sigmoid")
+                except Exception as calibration_exc:
+                    models["logistic_calibrated"] = {"status": "unavailable", "reason": str(calibration_exc)}
+            except Exception as model_exc:
+                models["gradient_boosting"] = {"status": "unavailable", "reason": str(model_exc)}
+            output["models"][horizon] = {
+                "status": "candidate",
+                "sample_count": len(labels),
+                "train_count": split,
+                "test_count": len(expected),
+                "models": models,
+                "meta_labeling": {"status": "enabled", "rule": "selection_score >= 60 as base signal"},
+                "baseline_vs_challenger": {
+                    "baseline": models.get("logistic", {}).get("brier_score"),
+                    "challenger": models.get("gradient_boosting", {}).get("brier_score"),
+                },
+            }
+            output["status"] = "candidate_ready"
+        output["release_policy"] = "仅评估 challenger，不自动替换线上模型。"
+        return output
 
     def delete(self, analysis_id: str | None) -> None:
         if not analysis_id:

@@ -13,12 +13,6 @@
       "note": ""
     },
     {
-      "symbol": "300274",
-      "name": "阳光电源",
-      "self_price": 111.5,
-      "note": ""
-    },
-    {
       "symbol": "300394",
       "name": "天孚通信",
       "self_price": 249.5,
@@ -47,14 +41,50 @@
       "name": "融捷股份",
       "self_price": 72.17,
       "note": ""
+    },
+    {
+      "symbol": "600378",
+      "name": "昊华科技",
+      "self_price": 48.46,
+      "note": ""
+    },
+    {
+      "symbol": "600183",
+      "name": "生益科技",
+      "self_price": 140.97,
+      "note": ""
+    },
+    {
+      "symbol": "300476",
+      "name": "胜宏科技",
+      "self_price": 241.6,
+      "note": ""
     }
   ],
   "positions": [
     {
       "symbol": "600105",
       "name": "永鼎股份",
-      "quantity": 1600.0,
-      "entry_price": 40.83
+      "quantity": 1100.0,
+      "entry_price": 40.73
+    },
+    {
+      "symbol": "002882",
+      "name": "金龙羽",
+      "quantity": 600.0,
+      "entry_price": 22.03
+    },
+    {
+      "symbol": "002192",
+      "name": "融捷股份",
+      "quantity": 200.0,
+      "entry_price": 73.19
+    },
+    {
+      "symbol": "600362",
+      "name": "江西铜业",
+      "quantity": 300.0,
+      "entry_price": 49.28
     }
   ],
   "manual_trades": [
@@ -107,6 +137,56 @@
       "quantity": 100.0,
       "net_pnl": -536.2000000000023,
       "time": "2026-08-26T12:16:39.154679+00:00"
+    },
+    {
+      "id": "manual-6",
+      "symbol": "600110",
+      "name": "诺德股份",
+      "action": "buy",
+      "price": 11.23,
+      "quantity": 900.0,
+      "net_pnl": 0.0,
+      "time": "2026-08-27T13:33:11.547018+00:00"
+    },
+    {
+      "id": "manual-7",
+      "symbol": "600110",
+      "name": "诺德股份",
+      "action": "sell",
+      "price": 11.05,
+      "quantity": 900.0,
+      "net_pnl": -161.99999999999974,
+      "time": "2026-08-28T10:55:10.307941+00:00"
+    },
+    {
+      "id": "manual-8",
+      "symbol": "002882",
+      "name": "金龙羽",
+      "action": "buy",
+      "price": 22.03,
+      "quantity": 600.0,
+      "net_pnl": 0.0,
+      "time": "2026-08-28T10:55:34.181050+00:00"
+    },
+    {
+      "id": "manual-9",
+      "symbol": "002192",
+      "name": "融捷股份",
+      "action": "buy",
+      "price": 73.19,
+      "quantity": 200.0,
+      "net_pnl": 0.0,
+      "time": "2026-08-28T11:04:45.105624+00:00"
+    },
+    {
+      "id": "manual-10",
+      "symbol": "600362",
+      "name": "江西铜业",
+      "action": "buy",
+      "price": 49.28,
+      "quantity": 300.0,
+      "net_pnl": 0.0,
+      "time": "2026-08-28T11:05:48.663545+00:00"
     }
   ],
   "initialized": true

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, List, Optional
@@ -82,6 +83,20 @@ class HttpSignalSource(SignalSourceBase):
         """起 HTTP 服务线程, 确认就绪后返回(见 SignalSource 协议说明)."""
         if self._server is not None:
             return
+        # The webhook is deliberately local by default.  On developer
+        # machines Windows may have a system HTTP proxy configured; unless
+        # localhost is explicitly excluded, clients such as httpx can send
+        # this loopback request through that proxy and receive a misleading
+        # 502 before it ever reaches our handler.
+        if self._host in {LOCALHOST, "localhost", "::1"}:
+            existing = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+            hosts = [item.strip() for item in existing.split(",") if item.strip()]
+            for host in ("127.0.0.1", "localhost", "::1"):
+                if host not in hosts:
+                    hosts.append(host)
+            value = ",".join(hosts)
+            os.environ["NO_PROXY"] = value
+            os.environ["no_proxy"] = value
         self._server = ThreadingHTTPServer(
             (self._host, self._port), self._make_handler()
         )
