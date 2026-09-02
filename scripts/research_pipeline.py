@@ -21,9 +21,15 @@ import numpy as np
 import pandas as pd
 
 
-FEATURE_VERSION = "trend_swing_features_v1"
+FEATURE_VERSION = "trend_swing_features_mfi_v3"
 LABEL_VERSION = "forward_return_triple_barrier_v1"
-SIMULATOR_VERSION = "a_share_trend_swing_v2"
+SIMULATOR_VERSION = "a_share_trend_swing_mfi_v7"
+MAX_PORTFOLIO_POSITIONS = 4
+MFI_PERIOD = 14
+MFI_NORMAL_MIN = 30.0
+MFI_NORMAL_MAX = 85.0
+MFI_MAIN_RISE_MIN = 35.0
+MFI_LIMIT_UP_MIN = 60.0
 
 
 def pareto_front(results: Sequence[Mapping[str, Any]], objectives: Sequence[str] = ("sharpe_ratio", "total_return_pct", "max_drawdown_pct")) -> list[dict[str, Any]]:
@@ -40,9 +46,8 @@ def pareto_front(results: Sequence[Mapping[str, Any]], objectives: Sequence[str]
             for objective in objectives:
                 left = float(other.get(objective, 0.0) or 0.0)
                 right = float(candidate.get(objective, 0.0) or 0.0)
-                # Lower drawdown is better; values are negative in reports.
-                if objective == "max_drawdown_pct":
-                    left, right = -left, -right
+                # Drawdown values are negative, so the value closer to zero is
+                # already greater and therefore better. Do not invert it.
                 if left < right:
                     better_or_equal = False
                     break
@@ -78,7 +83,7 @@ def multi_objective_optimize(
     except Exception as exc:  # pragma: no cover - optional dependency guard
         return {"status": "unavailable", "optimizer": "optuna_tpe", "reason": str(exc), "strategy": strategy, "trial_count": 0, "pareto_count": 0, "pareto_front": [], "best": None}
 
-    normalized = normalize_series(series_by_symbol)
+    normalized = prepare_simulation_series(series_by_symbol)
     timeline = sorted({date for frame in normalized.values() for date in frame.index})
     storage_url: str | None = None
     if storage_path is not None:
@@ -96,6 +101,19 @@ def multi_objective_optimize(
         storage=storage_url,
         load_if_exists=bool(storage_url),
     )
+    seed_params = {
+        key: list(values)[0]
+        for key, values in param_grid.items()
+        if list(values)
+    }
+    if seed_params and not any(
+        trial.state.name == "COMPLETE" and dict(trial.params) == seed_params
+        for trial in study.trials
+    ):
+        # Always evaluate one deterministic, auditable baseline before TPE.
+        # This prevents a small categorical trial budget from missing a known
+        # robust configuration while all later trials remain Bayesian.
+        study.enqueue_trial(seed_params)
 
     def objective(trial: Any) -> float:
         params = {
@@ -111,13 +129,25 @@ def multi_objective_optimize(
                 symbol: frame.loc[frame.index <= cutoff]
                 for symbol, frame in normalized.items()
             } if cutoff is not None else normalized
-            interim = simulate_strategy(subset, strategy=strategy, initial_cash=initial_cash, **params)
+            interim = simulate_strategy(
+                subset,
+                strategy=strategy,
+                initial_cash=initial_cash,
+                _prepared=True,
+                **params,
+            )
             interim_summary = interim.get("summary") or {}
             interim_score = _optimization_score(interim_summary)
             trial.report(interim_score, step)
             if trial.should_prune():
                 raise optuna.TrialPruned()
-        result = simulate_strategy(normalized, strategy=strategy, initial_cash=initial_cash, **params)
+        result = simulate_strategy(
+            normalized,
+            strategy=strategy,
+            initial_cash=initial_cash,
+            _prepared=True,
+            **params,
+        )
         summary = result.get("summary") or {}
         for key in ("sharpe_ratio", "total_return_pct", "max_drawdown_pct", "trade_count", "completed_trade_count", "win_rate"):
             trial.set_user_attr(key, float(summary.get(key) or 0.0))
@@ -172,7 +202,17 @@ def _optimization_score(summary: Mapping[str, Any]) -> float:
     drawdown = abs(float(summary.get("max_drawdown_pct") or 0.0)) / 100.0
     trade_count = float(summary.get("completed_trade_count") or summary.get("trade_count") or 0.0)
     activity_penalty = 0.25 if trade_count <= 0 else 0.0
-    return sharpe + 0.35 * total_return - 0.65 * drawdown - activity_penalty
+    # Drawdown is deliberately penalized more heavily than raw return.  This
+    # prevents high-beta momentum runs from winning merely because they earn
+    # more while violating the portfolio's risk budget.
+    drawdown_excess = max(0.0, drawdown - 0.12)
+    return (
+        sharpe
+        + 0.25 * total_return
+        - 1.25 * drawdown
+        - 4.0 * drawdown_excess
+        - activity_penalty
+    )
 
 
 def purged_walk_forward_optimize(
@@ -223,7 +263,7 @@ def combinatorial_purged_cross_validation(
     disjoint segment is simulated independently so positions cannot cross a
     removed boundary.
     """
-    data = normalize_series(series_by_symbol)
+    data = prepare_simulation_series(series_by_symbol)
     timeline = sorted({date for frame in data.values() for date in frame.index})
     n_splits = max(3, int(n_splits))
     n_test_splits = max(1, min(int(n_test_splits), n_splits - 1))
@@ -268,7 +308,13 @@ def combinatorial_purged_cross_validation(
         candidates: list[dict[str, Any]] = []
         for params in params_list:
             train_results = [
-                simulate_strategy(segment, strategy=strategy, initial_cash=initial_cash, **params)
+                simulate_strategy(
+                    segment,
+                    strategy=strategy,
+                    initial_cash=initial_cash,
+                    _prepared=True,
+                    **params,
+                )
                 for segment in train_segments
             ]
             summary = _aggregate_simulation_summaries(train_results)
@@ -282,7 +328,13 @@ def combinatorial_purged_cross_validation(
         )
         best = candidates[0] if candidates else {"params": {}, "score": -999.0, "summary": {}}
         test_results = [
-            simulate_strategy(segment, strategy=strategy, initial_cash=initial_cash, **best["params"])
+            simulate_strategy(
+                segment,
+                strategy=strategy,
+                initial_cash=initial_cash,
+                _prepared=True,
+                **best["params"],
+            )
             for segment in test_segments
         ]
         test_summary = _aggregate_simulation_summaries(test_results)
@@ -557,6 +609,44 @@ def normalize_series(series_by_symbol: Mapping[str, Any]) -> dict[str, pd.DataFr
     return output
 
 
+def prepare_simulation_series(
+    series_by_symbol: Mapping[str, Any],
+) -> dict[str, pd.DataFrame]:
+    """Normalize OHLCV and cache features reused by repeated simulations."""
+    output = normalize_series(series_by_symbol)
+    for symbol, frame in output.items():
+        augmented = frame.copy()
+        augmented["_mfi14"] = build_features(frame)["mfi14"]
+        close = augmented["close"]
+        returns = close.pct_change()
+        for window in (3, 5, 8, 10, 15, 20, 30, 60):
+            augmented[f"_ma{window}"] = close.rolling(window, min_periods=1).mean()
+        for window in (5, 10, 20):
+            augmented[f"_momentum{window}"] = close / close.shift(window) - 1.0
+        early_momentum20 = close / float(close.iloc[0]) - 1.0
+        augmented["_momentum20_context"] = augmented["_momentum20"].fillna(
+            early_momentum20
+        )
+        augmented["_volatility20"] = returns.rolling(20).std()
+        augmented["_volume5"] = augmented["volume"].rolling(5, min_periods=1).mean()
+        augmented["_volume20"] = augmented["volume"].rolling(20, min_periods=1).mean()
+        augmented["_recent_high20"] = augmented["high"].rolling(20, min_periods=1).max()
+        augmented["_recent_low20_previous"] = (
+            augmented["low"].shift(1).rolling(20, min_periods=1).min()
+        )
+        high_low = augmented["high"] - augmented["low"]
+        high_previous = (augmented["high"] - close.shift(1)).abs()
+        low_previous = (augmented["low"] - close.shift(1)).abs()
+        true_range = pd.concat(
+            [high_low, high_previous, low_previous], axis=1
+        ).max(axis=1)
+        augmented["_atr14"] = true_range.rolling(14, min_periods=1).mean()
+        augmented["_previous_close"] = close.shift(1)
+        augmented["_bar_number"] = np.arange(len(augmented), dtype=int)
+        output[symbol] = augmented
+    return output
+
+
 def make_snapshot(series_by_symbol: Mapping[str, pd.DataFrame]) -> DatasetSnapshot:
     """Build a deterministic dataset version from normalized frames."""
     chunks: list[str] = []
@@ -619,6 +709,20 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
     out["rsi14"] = 100.0 - 100.0 / (1.0 + rs)
+    typical_price = (data["high"] + data["low"] + close) / 3.0
+    raw_money_flow = typical_price * volume
+    direction = typical_price.diff()
+    positive_flow = raw_money_flow.where(direction > 0, 0.0)
+    negative_flow = raw_money_flow.where(direction < 0, 0.0)
+    positive_sum = positive_flow.rolling(MFI_PERIOD).sum()
+    negative_sum = negative_flow.rolling(MFI_PERIOD).sum()
+    money_ratio = positive_sum / negative_sum.replace(0, np.nan)
+    mfi = 100.0 - 100.0 / (1.0 + money_ratio)
+    mfi = mfi.mask((negative_sum <= 1e-12) & (positive_sum > 1e-12), 100.0)
+    mfi = mfi.mask((positive_sum <= 1e-12) & (negative_sum > 1e-12), 0.0)
+    out["mfi14"] = mfi.mask(
+        (positive_sum <= 1e-12) & (negative_sum <= 1e-12), 50.0
+    )
     return out.replace([np.inf, -np.inf], np.nan)
 
 
@@ -688,6 +792,79 @@ def build_dataset_bundle(series_by_symbol: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _latest_mfi(history: pd.DataFrame, period: int = MFI_PERIOD) -> float:
+    """Return standard MFI for the latest bar of a point-in-time slice."""
+    if len(history) < period + 1:
+        return 50.0
+    typical = (history["high"] + history["low"] + history["close"]) / 3.0
+    raw_flow = typical * history["volume"].fillna(0.0)
+    direction = typical.diff()
+    positive = float(raw_flow.where(direction > 0, 0.0).tail(period).sum())
+    negative = float(raw_flow.where(direction < 0, 0.0).tail(period).sum())
+    if negative <= 1e-12:
+        return 100.0 if positive > 1e-12 else 50.0
+    if positive <= 1e-12:
+        return 0.0
+    return 100.0 - 100.0 / (1.0 + positive / negative)
+
+
+def _mfi_entry_context(
+    history: pd.DataFrame, *, momentum20: float, volume_ratio: float
+) -> dict[str, Any]:
+    """Apply the same style-aware MFI thresholds as the live signal engine."""
+    stored_mfi = history["_mfi14"].iloc[-1] if "_mfi14" in history else np.nan
+    mfi14 = float(stored_mfi) if pd.notna(stored_mfi) else _latest_mfi(history)
+    close = float(history["close"].iloc[-1])
+    previous_close = float(history["close"].iloc[-2])
+    daily_return = close / previous_close - 1.0 if previous_close > 0 else 0.0
+    recent_high = float(history["high"].tail(20).max())
+    if daily_return >= 0.095:
+        regime, lower, upper = "limit_up_chain", MFI_LIMIT_UP_MIN, None
+    elif (momentum20 >= 0.12 and close >= recent_high * 0.97) or (
+        daily_return >= 0.055 and volume_ratio >= 1.20
+    ):
+        regime, lower, upper = "main_rise", MFI_MAIN_RISE_MIN, None
+    else:
+        regime, lower, upper = "normal_trend", MFI_NORMAL_MIN, MFI_NORMAL_MAX
+    passed = mfi14 >= lower and (upper is None or mfi14 <= upper)
+    return {
+        "mfi14": mfi14,
+        "regime": regime,
+        "minimum": lower,
+        "maximum": upper,
+        "passed": passed,
+    }
+
+
+def _mfi_entry_context_values(
+    *,
+    mfi14: float,
+    close: float,
+    previous_close: float,
+    recent_high: float,
+    momentum20: float,
+    volume_ratio: float,
+) -> dict[str, Any]:
+    """Evaluate the MFI gate from precomputed point-in-time values."""
+    daily_return = close / previous_close - 1.0 if previous_close > 0 else 0.0
+    if daily_return >= 0.095:
+        regime, lower, upper = "limit_up_chain", MFI_LIMIT_UP_MIN, None
+    elif (momentum20 >= 0.12 and close >= recent_high * 0.97) or (
+        daily_return >= 0.055 and volume_ratio >= 1.20
+    ):
+        regime, lower, upper = "main_rise", MFI_MAIN_RISE_MIN, None
+    else:
+        regime, lower, upper = "normal_trend", MFI_NORMAL_MIN, MFI_NORMAL_MAX
+    passed = mfi14 >= lower and (upper is None or mfi14 <= upper)
+    return {
+        "mfi14": mfi14,
+        "regime": regime,
+        "minimum": lower,
+        "maximum": upper,
+        "passed": passed,
+    }
+
+
 def _params_product(param_grid: Mapping[str, Sequence[Any]]) -> Iterable[dict[str, Any]]:
     keys = list(param_grid)
     for values in itertools.product(*(param_grid[key] for key in keys)):
@@ -699,19 +876,124 @@ def simulate_trend_swing(
     *,
     initial_cash: float = 100_000.0,
     entry_weight: float = 0.10,
-    max_positions: int = 5,
+    max_positions: int = MAX_PORTFOLIO_POSITIONS,
     fast_window: int = 5,
     slow_window: int = 20,
     momentum_window: int = 20,
+    volatility_window: int = 20,
+    volatility_cap: float = 0.045,
+    momentum_vol_weight: float = 1.0,
+    trailing_atr_multiple: float = 2.5,
+    max_holding_bars: int = 20,
+    momentum_exit_threshold: float = -0.01,
+    max_entry_momentum: float = 0.35,
+    regime_window: int = 5,
+    regime_momentum_threshold: float = 0.015,
+    regime_acceleration_threshold: float = 0.0,
+    regime_exit_threshold: float = -0.01,
+    min_market_breadth: float = 0.50,
+    breakout_tolerance: float = 0.02,
+    pullback_tolerance: float = 0.03,
+    min_volume_ratio: float = 0.90,
+    breakout_entry_mode: str = "strict_breakout_or_pullback",
+    breakout_rank_bonus: float = 0.25,
     commission_rate: float = 0.0003,
     stamp_tax_rate: float = 0.0005,
     slippage_rate: float = 0.001,
     lot_size: int = 100,
     strategy: str = "trend_swing",
+    _prepared: bool = False,
 ) -> dict[str, Any]:
     """Simulate a local-pool strategy with explicit costs and A-share guards."""
-    data = normalize_series(series_by_symbol)
+    if _prepared:
+        data = {
+            str(symbol): frame
+            for symbol, frame in series_by_symbol.items()
+            if isinstance(frame, pd.DataFrame) and not frame.empty
+        }
+    else:
+        data = prepare_simulation_series(series_by_symbol)
     dates = sorted({date for frame in data.values() for date in frame.index})
+    indicators: dict[str, dict[str, Any]] = {}
+    for symbol, frame in data.items():
+        close = frame["close"]
+        returns = close.pct_change()
+        series_indicators = {
+            "ma_fast": frame[f"_ma{fast_window}"]
+            if f"_ma{fast_window}" in frame
+            else close.rolling(fast_window, min_periods=1).mean(),
+            "ma_slow": frame[f"_ma{slow_window}"]
+            if f"_ma{slow_window}" in frame
+            else close.rolling(slow_window, min_periods=1).mean(),
+            "momentum": frame[f"_momentum{momentum_window}"]
+            if f"_momentum{momentum_window}" in frame
+            else close / close.shift(momentum_window) - 1.0,
+            "momentum20": frame["_momentum20_context"]
+            if "_momentum20_context" in frame
+            else (close / close.shift(20) - 1.0).fillna(close / float(close.iloc[0]) - 1.0),
+            "regime_momentum": close / close.shift(max(1, regime_window)) - 1.0,
+            "volatility": frame[f"_volatility{volatility_window}"]
+            if f"_volatility{volatility_window}" in frame
+            else returns.rolling(volatility_window).std(),
+            "volume5": frame["_volume5"]
+            if "_volume5" in frame
+            else frame["volume"].rolling(5, min_periods=1).mean(),
+            "volume20": frame["_volume20"]
+            if "_volume20" in frame
+            else frame["volume"].rolling(20, min_periods=1).mean(),
+            "recent_high20": frame["_recent_high20"]
+            if "_recent_high20" in frame
+            else frame["high"].rolling(20, min_periods=1).max(),
+            "recent_low20_previous": frame["_recent_low20_previous"]
+            if "_recent_low20_previous" in frame
+            else frame["low"].shift(1).rolling(20, min_periods=1).min(),
+            "atr14": frame["_atr14"]
+            if "_atr14" in frame
+            else pd.concat(
+                [
+                    frame["high"] - frame["low"],
+                    (frame["high"] - close.shift(1)).abs(),
+                    (frame["low"] - close.shift(1)).abs(),
+                ],
+                axis=1,
+            )
+            .max(axis=1)
+            .rolling(14, min_periods=1)
+            .mean(),
+            "previous_close": frame["_previous_close"]
+            if "_previous_close" in frame
+            else close.shift(1),
+            "bar_number": frame["_bar_number"]
+            if "_bar_number" in frame
+            else pd.Series(np.arange(len(frame), dtype=int), index=frame.index),
+            "mfi14": frame["_mfi14"]
+            if "_mfi14" in frame
+            else build_features(frame)["mfi14"],
+        }
+        indicators[symbol] = {
+            key: series.to_numpy(dtype=float, copy=False)
+            for key, series in series_indicators.items()
+        }
+        indicators[symbol]["close"] = close.to_numpy(dtype=float, copy=False)
+        indicators[symbol]["date_position"] = {
+            date: index for index, date in enumerate(frame.index)
+        }
+    market_breadth_by_date: dict[Any, float] = {}
+    warmup_bars = max(slow_window, momentum_window, regime_window) + 1
+    for date in dates:
+        eligible = 0
+        positive = 0
+        for indicator in indicators.values():
+            date_position = indicator["date_position"].get(date)
+            if date_position is None or int(indicator["bar_number"][date_position]) + 1 < warmup_bars:
+                continue
+            eligible += 1
+            positive += int(
+                float(indicator["close"][date_position])
+                > float(indicator["ma_slow"][date_position])
+                and float(indicator["momentum"][date_position]) > 0
+            )
+        market_breadth_by_date[date] = positive / eligible if eligible else 0.0
     cash = float(initial_cash)
     holdings: dict[str, dict[str, float]] = {}
     trades: list[dict[str, Any]] = []
@@ -723,59 +1005,170 @@ def simulate_trend_swing(
 
     for date in dates:
         for symbol in list(holdings):
-            frame = data[symbol]
-            if date not in frame.index:
+            indicator = indicators[symbol]
+            date_position = indicator["date_position"].get(date)
+            if date_position is None:
                 continue
-            history = frame.loc[:date]
-            if len(history) < max(slow_window, momentum_window) + 1:
+            bar_number = int(indicator["bar_number"][date_position])
+            if bar_number + 1 < warmup_bars:
                 continue
-            row = history.iloc[-1]
-            ma_fast = history["close"].tail(fast_window).mean()
-            ma_slow = history["close"].tail(slow_window).mean()
-            momentum = history["close"].iloc[-1] / history["close"].iloc[-momentum_window - 1] - 1.0
-            prev_close = float(history["close"].iloc[-2]) if len(history) > 1 else float(row["close"])
+            current_close = float(indicator["close"][date_position])
+            ma_fast = float(indicator["ma_fast"][date_position])
+            ma_slow = float(indicator["ma_slow"][date_position])
+            momentum = float(indicator["momentum"][date_position])
+            regime_momentum = float(indicator["regime_momentum"][date_position])
+            previous_value = float(indicator["previous_close"][date_position])
+            prev_close = previous_value if math.isfinite(previous_value) else current_close
+            regime_vol = float(indicator["volatility"][date_position])
+            atr = float(indicator["atr14"][date_position])
+            position = holdings[symbol]
+            peak_price = max(
+                float(position.get("peak_price") or current_close), current_close
+            )
+            position["peak_price"] = peak_price
+            position["holding_bars"] = int(position.get("holding_bars") or 0) + 1
+            trailing_stop = peak_price - max(0.0, trailing_atr_multiple) * atr
+            risk_exit = (
+                current_close < trailing_stop
+                or position["holding_bars"] >= max_holding_bars
+                or (
+                    regime_vol == regime_vol
+                    and regime_vol > volatility_cap * 1.35
+                )
+            )
             if strategy == "breakout_pullback":
-                recent_high = history["high"].iloc[:-1].tail(20).max()
-                recent_low = history["low"].iloc[:-1].tail(20).min()
-                exit_signal = float(row["close"]) < ma_slow or float(row["close"]) < recent_low
+                recent_low = float(indicator["recent_low20_previous"][date_position])
+                exit_signal = (
+                    current_close < ma_slow
+                    or current_close < recent_low
+                    or momentum < momentum_exit_threshold
+                    or risk_exit
+                )
             elif strategy == "momentum_regime":
-                regime_vol = history["close"].pct_change().tail(20).std()
-                exit_signal = momentum < 0 or float(row["close"]) < ma_slow or (regime_vol == regime_vol and regime_vol > 0.08)
+                exit_signal = (
+                    regime_momentum < regime_exit_threshold
+                    or current_close < ma_fast
+                    or market_breadth_by_date.get(date, 0.0)
+                    < max(0.0, min_market_breadth * 0.80)
+                    or risk_exit
+                )
             else:
-                exit_signal = float(row["close"]) < ma_slow or momentum < 0
+                exit_signal = (
+                    current_close < ma_slow
+                    or momentum < momentum_exit_threshold
+                    or risk_exit
+                )
             # T+1 and limit-down guard: an A-share position cannot be sold on
             # the same bar it was bought or when the close is locked at limit.
             position = holdings[symbol]
             if position.get("entry_date") == str(date):
                 continue
-            if float(row["close"]) <= prev_close * 0.905:
+            if current_close <= prev_close * 0.905:
                 continue
             if not exit_signal:
                 continue
             position = holdings.pop(symbol)
             quantity = int(position["quantity"])
-            execution = float(row["close"]) * (1.0 - slippage_rate)
+            execution = current_close * (1.0 - slippage_rate)
             gross = execution * quantity
             fee = cost(gross, selling=True)
             cash += gross - fee
             pnl = gross - fee - position["cost"]
             trades.append({"time": str(date), "symbol": symbol, "action": "sell", "price": execution, "quantity": quantity, "net_pnl": pnl, "fee": fee, "reason": "趋势或动量失效"})
 
-        candidates: list[tuple[float, str, float]] = []
-        for symbol, frame in data.items():
-            if symbol in holdings or date not in frame.index:
+        candidates: list[tuple[float, str, float, float, str]] = []
+        for symbol in data:
+            if symbol in holdings:
                 continue
-            history = frame.loc[:date]
-            if len(history) < max(slow_window, momentum_window) + 1:
+            indicator = indicators[symbol]
+            date_position = indicator["date_position"].get(date)
+            if date_position is None:
                 continue
-            close = float(history["close"].iloc[-1])
-            ma_fast = history["close"].tail(fast_window).mean()
-            ma_slow = history["close"].tail(slow_window).mean()
-            momentum = close / history["close"].iloc[-momentum_window - 1] - 1.0
-            if close > ma_fast > ma_slow and momentum > 0:
-                candidates.append((float(momentum), symbol, close))
+            bar_number = int(indicator["bar_number"][date_position])
+            if bar_number + 1 < warmup_bars:
+                continue
+            close = float(indicator["close"][date_position])
+            ma_fast = float(indicator["ma_fast"][date_position])
+            ma_slow = float(indicator["ma_slow"][date_position])
+            momentum = float(indicator["momentum"][date_position])
+            momentum20 = float(indicator["momentum20"][date_position])
+            regime_momentum = float(indicator["regime_momentum"][date_position])
+            normalized_long_momentum = momentum * max(1, regime_window) / max(
+                1, momentum_window
+            )
+            momentum_acceleration = regime_momentum - normalized_long_momentum
+            volume5 = float(indicator["volume5"][date_position])
+            volume20 = float(indicator["volume20"][date_position])
+            volume_ratio = volume5 / volume20 if volume20 > 1e-12 else 1.0
+            previous_value = float(indicator["previous_close"][date_position])
+            previous_close = previous_value if math.isfinite(previous_value) else close
+            mfi_context = _mfi_entry_context_values(
+                mfi14=float(indicator["mfi14"][date_position]),
+                close=close,
+                previous_close=previous_close,
+                recent_high=float(indicator["recent_high20"][date_position]),
+                momentum20=momentum20,
+                volume_ratio=volume_ratio,
+            )
+            regime_vol = float(indicator["volatility"][date_position])
+            risk_scale = max(regime_vol, 0.005)
+            ranking_score = float(momentum) / (
+                risk_scale ** max(0.0, momentum_vol_weight)
+            )
+            momentum_risk_ok = (
+                regime_vol == regime_vol
+                and regime_vol <= volatility_cap
+                and momentum20 <= max_entry_momentum
+            )
+            trend_setup = close > ma_fast > ma_slow
+            if strategy == "breakout_pullback":
+                recent_high = float(indicator["recent_high20"][date_position])
+                breakout_setup = (
+                    close >= recent_high * (1.0 - max(0.0, breakout_tolerance))
+                    and volume_ratio >= min_volume_ratio
+                )
+                pullback_setup = (
+                    ma_fast > ma_slow
+                    and close >= ma_fast
+                    and close <= ma_fast * (1.0 + max(0.0, pullback_tolerance))
+                )
+                if breakout_entry_mode == "breakout_only":
+                    pattern_setup = breakout_setup
+                elif breakout_entry_mode == "pullback_only":
+                    pattern_setup = pullback_setup
+                else:
+                    # Legacy ``trend_with_breakout_overlay`` is deliberately
+                    # treated as strict pattern confirmation in v7. It may no
+                    # longer collapse into the ordinary trend strategy.
+                    pattern_setup = breakout_setup or pullback_setup
+                trend_setup = close > ma_slow and pattern_setup
+                if breakout_setup:
+                    ranking_score += max(0.0, breakout_rank_bonus)
+            elif strategy == "momentum_regime":
+                trend_setup = (
+                    close > ma_fast > ma_slow
+                    and regime_momentum >= regime_momentum_threshold
+                    and momentum_acceleration >= regime_acceleration_threshold
+                    and market_breadth_by_date.get(date, 0.0) >= min_market_breadth
+                )
+                ranking_score += max(0.0, momentum_acceleration) / risk_scale
+            if (
+                trend_setup
+                and momentum > 0
+                and bool(mfi_context["passed"])
+                and momentum_risk_ok
+            ):
+                candidates.append(
+                    (
+                        ranking_score,
+                        symbol,
+                        close,
+                        float(mfi_context["mfi14"]),
+                        str(mfi_context["regime"]),
+                    )
+                )
         candidates.sort(reverse=True)
-        for momentum, symbol, close in candidates[: max(0, max_positions - len(holdings))]:
+        for ranking_score, symbol, close, mfi14, mfi_regime in candidates[: max(0, max_positions - len(holdings))]:
             notional = cash * entry_weight
             quantity = int(notional / (close * (1.0 + slippage_rate)) / lot_size) * lot_size
             if quantity <= 0:
@@ -785,21 +1178,32 @@ def simulate_trend_swing(
             fee = cost(gross)
             if gross + fee > cash:
                 continue
-            entry_history = data[symbol].loc[:date]
-            prev_close = float(entry_history["close"].iloc[-2]) if len(entry_history) > 1 else close
+            date_position = indicators[symbol]["date_position"][date]
+            previous_value = float(
+                indicators[symbol]["previous_close"][date_position]
+            )
+            prev_close = previous_value if math.isfinite(previous_value) else close
             # Skip limit-up entries; this approximates an unfillable locked
             # board without pretending we have intraday order-book data.  The
             # fillability check must happen before cash is debited.
             if close >= prev_close * 1.095:
                 continue
             cash -= gross + fee
-            holdings[symbol] = {"quantity": float(quantity), "cost": gross + fee, "price": execution, "entry_date": str(date)}
-            trades.append({"time": str(date), "symbol": symbol, "action": "buy", "price": execution, "quantity": quantity, "net_pnl": 0.0, "fee": fee, "reason": "趋势、均线和动量共振"})
-        market_value = sum(
-            float(data[symbol].loc[date, "close"]) * position["quantity"]
-            for symbol, position in holdings.items()
-            if date in data[symbol].index
-        )
+            holdings[symbol] = {"quantity": float(quantity), "cost": gross + fee, "price": execution, "entry_date": str(date), "peak_price": close, "holding_bars": 0}
+            reason = f"趋势、风险调整动量与 MFI 共振（排序={ranking_score:.2f}, MFI14={mfi14:.1f}）"
+            if strategy == "breakout_pullback":
+                reason = f"突破/回踩、波动率与 MFI 共振（排序={ranking_score:.2f}, MFI14={mfi14:.1f}）"
+            if strategy == "momentum_regime":
+                reason = f"风险调整动量、波动率与 MFI 共振（排序={ranking_score:.2f}, MFI14={mfi14:.1f}）"
+            trades.append({"time": str(date), "symbol": symbol, "action": "buy", "price": execution, "quantity": quantity, "net_pnl": 0.0, "fee": fee, "reason": reason})
+        market_value = 0.0
+        for symbol, position in holdings.items():
+            date_position = indicators[symbol]["date_position"].get(date)
+            if date_position is not None:
+                market_value += (
+                    float(indicators[symbol]["close"][date_position])
+                    * position["quantity"]
+                )
         curve.append({"time": str(date), "value": cash + market_value, "cash": cash, "market_value": market_value, "position_count": len(holdings)})
 
     if not curve:
@@ -845,7 +1249,7 @@ def walk_forward_optimize(
     strategy: str = "trend_swing",
 ) -> dict[str, Any]:
     """Run lightweight nested time-slice optimization for the local pool."""
-    data = normalize_series(series_by_symbol)
+    data = prepare_simulation_series(series_by_symbol)
     timeline = sorted({date for frame in data.values() for date in frame.index})
     if len(timeline) < train_bars + test_bars:
         return {"status": "insufficient_data", "windows": [], "summary": {}}
@@ -859,12 +1263,24 @@ def walk_forward_optimize(
         test_data = {symbol: frame.loc[(frame.index >= test_start) & (frame.index <= test_end)] for symbol, frame in data.items()}
         candidates: list[dict[str, Any]] = []
         for params in _params_product(param_grid):
-            result = simulate_strategy(train_data, strategy=strategy, initial_cash=initial_cash, **params)
+            result = simulate_strategy(
+                train_data,
+                strategy=strategy,
+                initial_cash=initial_cash,
+                _prepared=True,
+                **params,
+            )
             score = float((result.get("summary") or {}).get("sharpe_ratio", -999.0))
             candidates.append({"params": params, "score": score, "summary": result.get("summary", {})})
         candidates.sort(key=lambda item: (item["score"], item["summary"].get("total_return_pct", -999.0)), reverse=True)
         best = candidates[0] if candidates else {"params": {}, "score": -999.0}
-        test_result = simulate_strategy(test_data, strategy=strategy, initial_cash=initial_cash, **best["params"])
+        test_result = simulate_strategy(
+            test_data,
+            strategy=strategy,
+            initial_cash=initial_cash,
+            _prepared=True,
+            **best["params"],
+        )
         curve = test_result.get("equity_curve") or []
         combined_curve.extend(curve if not combined_curve else curve[1:])
         windows.append({"strategy": strategy, "train_start": str(train_start), "train_end": str(train_end), "test_start": str(test_start), "test_end": str(test_end), "best_params": best["params"], "train_score": best["score"], "test_summary": test_result.get("summary", {})})

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import importlib.util
 import json
 import math
@@ -40,12 +41,10 @@ from research_pipeline import (  # noqa: E402
     SIMULATOR_VERSION,
     build_dataset_bundle,
     deflated_sharpe_ratio,
-    normalize_series,
     multi_objective_optimize,
     persist_artifact,
     probability_of_backtest_overfitting,
     purged_walk_forward_optimize,
-    simulate_trend_swing,
     simulate_strategy,
     walk_forward_optimize,
 )
@@ -56,10 +55,21 @@ EASTMONEY_SEARCH = "https://searchapi.eastmoney.com/api/suggest/get"
 EASTMONEY_TRENDS = "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
 EASTMONEY_CLIST = "https://push2.eastmoney.com/api/qt/clist/get"
 TENCENT_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+SINA_KLINE = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
 STATE_FILE = ".review_center_state.json"
 POOL_CACHE_FILE = ".review_center_pool_cache.json"
 BACKTEST_CACHE_FILE = ".review_center_backtest_cache.json"
-POOL_CACHE_VERSION = 2
+POOL_CACHE_VERSION = 4
+MODEL_ENSEMBLE_VERSION = "short_swing_ensemble_v1"
+MODEL_ENSEMBLE_WEIGHTS = {
+    # Trend is the non-negotiable style gate; the other two models confirm
+    # timing and market state.  This keeps the ensemble short/ultra-short
+    # trend-following instead of drifting into medium/long-term selection.
+    "trend_swing": 0.40,
+    "breakout_pullback": 0.30,
+    "momentum_regime": 0.30,
+}
+MODEL_ENSEMBLE_ENTRY_THRESHOLD = 0.60
 REVIEW_INITIAL_EQUITY = 100000.0
 KLINE_HISTORY_DAYS = 360
 QUOTE_CACHE_TTL_SECONDS = 180.0
@@ -73,9 +83,23 @@ STRONG_BUY_SCORE_THRESHOLD = 72.0
 STRONG_BUY_PROBABILITY_THRESHOLD = 0.58
 ADD_SCORE_THRESHOLD = 75.0
 ADD_PROBABILITY_THRESHOLD = 0.60
+SWING_WATCH_SCORE_THRESHOLD = 58.0
+SWING_WATCH_FIVE_DAY_PROBABILITY_THRESHOLD = 0.52
+SWING_BUY_SCORE_THRESHOLD = 62.0
+SWING_BUY_FIVE_DAY_PROBABILITY_THRESHOLD = 0.56
+SWING_STRONG_BUY_SCORE_THRESHOLD = 68.0
+SWING_STRONG_FIVE_DAY_PROBABILITY_THRESHOLD = 0.60
+SWING_ADD_SCORE_THRESHOLD = 70.0
+SWING_ADD_FIVE_DAY_PROBABILITY_THRESHOLD = 0.62
+MFI_PERIOD = 14
+MFI_NORMAL_MIN = 30.0
+MFI_NORMAL_MAX = 85.0
+MFI_MAIN_RISE_MIN = 35.0
+MFI_LIMIT_UP_MIN = 60.0
 _DIRECT_OPENER = build_opener(ProxyHandler({}))
 _STOCK_KLINE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _STOCK_KLINE_CACHE_LOCK = RLock()
+_DAILY_TRADE_SCHEDULER_LOCK = RLock()
 _MARKET_INDEX_CACHE: tuple[float, list[dict[str, Any]]] | None = None
 _MARKET_INDEX_CACHE_LOCK = RLock()
 _AI_SERVICE: Any | None = None
@@ -96,14 +120,28 @@ def _traditional_rule_snapshot() -> dict[str, Any]:
     """Versioned threshold/rule snapshot passed verbatim to the LLM."""
     return {
         "strategy_id": "review_center_momentum_logit_v1",
-        "strategy_version": "review_center_momentum_logit_dual_horizon_v2",
-        "threshold_version": "review_center_thresholds_2026-08-26",
+        "strategy_version": "review_center_momentum_logit_mfi_swing_v4",
+        "threshold_version": "review_center_thresholds_2026-09-01_swing_probability",
+        "swing_score": {
+            "base_weights": {
+                "technical_score": 0.45,
+                "next_trading_day_probability": 0.20,
+                "next_5_trading_days_probability": 0.35,
+            },
+            "reliability_adjustment": "概率权重按各周期样本外 AUC/Brier/accuracy 折减后重新归一化",
+        },
         "thresholds": {
-            "watch": {"score_min": WATCH_SCORE_THRESHOLD, "next_day_probability_min": WATCH_PROBABILITY_THRESHOLD},
-            "buy": {"score_min": BUY_SCORE_THRESHOLD, "next_day_probability_min": BUY_PROBABILITY_THRESHOLD, "price_above": "MA20"},
-            "strong_buy": {"score_min": STRONG_BUY_SCORE_THRESHOLD, "next_day_probability_min": STRONG_BUY_PROBABILITY_THRESHOLD, "price_relation": "close > MA20 > MA60"},
-            "add": {"score_min": ADD_SCORE_THRESHOLD, "next_day_probability_min": ADD_PROBABILITY_THRESHOLD, "price_relation": "close > MA20 > MA60"},
+            "watch": {"swing_score_min": SWING_WATCH_SCORE_THRESHOLD, "next_day_probability_min": 0.49, "five_day_probability_min": SWING_WATCH_FIVE_DAY_PROBABILITY_THRESHOLD},
+            "buy": {"swing_score_min": SWING_BUY_SCORE_THRESHOLD, "next_day_probability_min": 0.52, "five_day_probability_min": SWING_BUY_FIVE_DAY_PROBABILITY_THRESHOLD, "price_above": "MA20"},
+            "strong_buy": {"swing_score_min": SWING_STRONG_BUY_SCORE_THRESHOLD, "next_day_probability_min": 0.56, "five_day_probability_min": SWING_STRONG_FIVE_DAY_PROBABILITY_THRESHOLD, "price_relation": "close > MA20 > MA60"},
+            "add": {"swing_score_min": SWING_ADD_SCORE_THRESHOLD, "next_day_probability_min": 0.58, "five_day_probability_min": SWING_ADD_FIVE_DAY_PROBABILITY_THRESHOLD, "price_relation": "close > MA20 > MA60"},
             "hard_stop": {"loss_pct": 0.08, "exit_ratio": 1.0},
+            "mfi14": {
+                "normal_trend": {"min": MFI_NORMAL_MIN, "max": MFI_NORMAL_MAX},
+                "main_rise": {"min": MFI_MAIN_RISE_MIN, "max": None},
+                "limit_up_chain": {"min": MFI_LIMIT_UP_MIN, "max": None},
+                "rule": "普通趋势过滤过弱/过热资金流；主升与连板不使用传统 MFI>80 超买否决",
+            },
         },
         "holding_rules": {
             "trend_exit": "close < MA60 and momentum20 < 0 => 清仓",
@@ -116,22 +154,27 @@ def _traditional_rule_snapshot() -> dict[str, Any]:
 
 def _traditional_action_summary(analysis: dict[str, Any], holding: bool) -> dict[str, Any]:
     """Expose the exact local threshold decision and its trigger to the LLM."""
-    score = _float(analysis.get("selection_score"))
     probability = _float(((analysis.get("probabilities") or {}).get("next_trading_day") or {}).get("value"), -1.0)
+    five_day_probability = _float(((analysis.get("probabilities") or {}).get("next_5_trading_days") or {}).get("value"), -1.0)
+    score = _float(analysis.get("swing_score"), _float(analysis.get("selection_score")))
     close, ma20, ma60 = _float(analysis.get("close")), _float(analysis.get("ma20")), _float(analysis.get("ma60"))
     momentum = _float(analysis.get("momentum20"))
+    mfi_filter = dict(analysis.get("mfi_filter") or {})
+    mfi_passed = bool(mfi_filter.get("passed", True))
     if holding and close < ma60 and momentum < 0:
         return {"action": "清仓", "trigger": "close < MA60 and momentum20 < 0"}
-    if holding and probability >= 0 and probability <= 0.40 and close < ma20:
-        return {"action": "减仓", "trigger": "next_day_probability <= 0.40 and close < MA20"}
-    if holding and score >= ADD_SCORE_THRESHOLD and probability >= ADD_PROBABILITY_THRESHOLD and close > ma20 > ma60:
-        return {"action": "加仓", "trigger": "add thresholds + close > MA20 > MA60"}
-    if not holding and score >= STRONG_BUY_SCORE_THRESHOLD and probability >= STRONG_BUY_PROBABILITY_THRESHOLD and close > ma20 > ma60:
-        return {"action": "买入", "trigger": "strong-buy thresholds + close > MA20 > MA60"}
-    if not holding and score >= BUY_SCORE_THRESHOLD and probability >= BUY_PROBABILITY_THRESHOLD and close > ma20:
-        return {"action": "买入", "trigger": "buy thresholds + close > MA20"}
-    if not holding and score >= WATCH_SCORE_THRESHOLD and probability >= WATCH_PROBABILITY_THRESHOLD:
-        return {"action": "等待买入", "trigger": "watch thresholds met; trend confirmation pending"}
+    if holding and probability >= 0 and probability <= 0.40 and five_day_probability <= 0.46 and close < ma20:
+        return {"action": "减仓", "trigger": "1日与5日概率同步转弱且 close < MA20"}
+    if holding and score >= SWING_ADD_SCORE_THRESHOLD and probability >= 0.58 and five_day_probability >= SWING_ADD_FIVE_DAY_PROBABILITY_THRESHOLD and close > ma20 > ma60 and mfi_passed:
+        return {"action": "加仓", "trigger": "波段综合分、1日/5日概率 + close > MA20 > MA60"}
+    if not holding and score >= SWING_STRONG_BUY_SCORE_THRESHOLD and probability >= 0.56 and five_day_probability >= SWING_STRONG_FIVE_DAY_PROBABILITY_THRESHOLD and close > ma20 > ma60 and mfi_passed:
+        return {"action": "买入", "trigger": "强势波段阈值 + close > MA20 > MA60"}
+    if not holding and score >= SWING_BUY_SCORE_THRESHOLD and probability >= 0.52 and five_day_probability >= SWING_BUY_FIVE_DAY_PROBABILITY_THRESHOLD and close > ma20 and mfi_passed:
+        return {"action": "买入", "trigger": "波段综合分与双周期概率达标 + close > MA20"}
+    if not holding and not mfi_passed and score >= SWING_WATCH_SCORE_THRESHOLD and probability >= 0.49 and five_day_probability >= SWING_WATCH_FIVE_DAY_PROBABILITY_THRESHOLD:
+        return {"action": "等待买入", "trigger": str(mfi_filter.get("reason") or "MFI filter not confirmed")}
+    if not holding and score >= SWING_WATCH_SCORE_THRESHOLD and probability >= 0.49 and five_day_probability >= SWING_WATCH_FIVE_DAY_PROBABILITY_THRESHOLD:
+        return {"action": "等待买入", "trigger": "波段综合分与双周期概率达到观察阈值"}
     return {"action": "持有" if holding else "观察", "trigger": "未触发更高优先级阈值"}
 
 
@@ -684,6 +727,67 @@ def _fetch_miaoxiang_sector(symbol: str, fallback_name: str | None = None) -> di
     return dict(result)
 
 
+# Choice/Miaoxiang may not return an identity row for every security.  Keep a
+# small local classification fallback so the current pool remains grouped and
+# sector aggregation does not collapse into one “未分类” bucket.
+_LOCAL_SECTOR_BY_SYMBOL = {
+    "603629": "消费电子",
+    "002851": "电源设备",
+    "300394": "通信设备",
+    "300136": "消费电子",
+    "002463": "元件",
+    "600487": "通信设备",
+    "002192": "能源金属",
+    "600378": "化学制品",
+    "600183": "元件",
+    "300476": "元件",
+    "300857": "计算机设备",
+    "603626": "通用设备",
+    "000712": "证券",
+    "600547": "贵金属",
+    "300604": "半导体设备",
+    "301526": "化学纤维",
+    "603256": "电子材料",
+    "000938": "通信设备",
+    "600584": "半导体",
+    "301511": "能源金属",
+    "300666": "半导体材料",
+    "300058": "传媒",
+    "301171": "传媒",
+    "002353": "专用设备",
+    "603283": "专用设备",
+    "000725": "光学光电子",
+    "601212": "工业金属",
+    "603259": "医疗服务",
+    "301183": "光学光电子",
+    "300456": "半导体",
+    "603667": "汽车零部件",
+    "002837": "专用设备",
+    "002536": "汽车零部件",
+    "600105": "通信设备",
+    "002882": "电力设备",
+    "600362": "工业金属",
+}
+
+
+def _local_sector_name(symbol: str, name: str | None = None) -> str | None:
+    code = _code(symbol)
+    if code in _LOCAL_SECTOR_BY_SYMBOL:
+        return _LOCAL_SECTOR_BY_SYMBOL[code]
+    text = f"{name or ''} {code}"
+    for keywords, sector in (
+        (("黄金", "白银"), "贵金属"),
+        (("通信", "光电", "光迅", "天孚"), "通信设备"),
+        (("半导体", "芯片", "封测"), "半导体"),
+        (("证券", "股份银行", "银行"), "证券"),
+        (("铜", "铝", "锌"), "工业金属"),
+        (("医药", "药明"), "医疗服务"),
+    ):
+        if any(keyword in text for keyword in keywords):
+            return sector
+    return None
+
+
 def _mean(values: list[float]) -> float:
     """Return a safe arithmetic mean for market feature calculations."""
     return statistics.fmean(values) if values else 0.0
@@ -719,6 +823,109 @@ def _rsi(closes: list[float], end: int, period: int = 14) -> float:
         return 100.0 if gains > 0 else 50.0
     relative_strength = gains / losses
     return 100.0 - 100.0 / (1.0 + relative_strength)
+
+
+def _money_flow_index(
+    candles: list[dict[str, Any]],
+    volumes: list[float],
+    end: int | None = None,
+    period: int = MFI_PERIOD,
+) -> float:
+    """Calculate the standard MFI using only bars observable at ``end``."""
+    if not candles:
+        return 50.0
+    end = len(candles) - 1 if end is None else min(end, len(candles) - 1)
+    if end < period or end >= len(volumes):
+        return 50.0
+    positive_flow = 0.0
+    negative_flow = 0.0
+    start = end - period + 1
+    for index in range(start, end + 1):
+        current = candles[index]
+        previous = candles[index - 1]
+        typical = (
+            _float(current.get("high"))
+            + _float(current.get("low"))
+            + _float(current.get("close"))
+        ) / 3.0
+        previous_typical = (
+            _float(previous.get("high"))
+            + _float(previous.get("low"))
+            + _float(previous.get("close"))
+        ) / 3.0
+        raw_flow = typical * max(0.0, _float(volumes[index]))
+        if typical > previous_typical:
+            positive_flow += raw_flow
+        elif typical < previous_typical:
+            negative_flow += raw_flow
+    if negative_flow <= 1e-12:
+        return 100.0 if positive_flow > 1e-12 else 50.0
+    if positive_flow <= 1e-12:
+        return 0.0
+    money_ratio = positive_flow / negative_flow
+    return 100.0 - 100.0 / (1.0 + money_ratio)
+
+
+def _mfi_regime(
+    closes: list[float],
+    highs: list[float],
+    volumes: list[float],
+    end: int,
+    *,
+    momentum20: float,
+    volume_ratio: float,
+) -> str:
+    """Separate ordinary trends from main-rise and limit-up-chain setups."""
+    if end <= 0:
+        return "normal_trend"
+    daily_return = _return(closes, end, 1)
+    if daily_return >= 0.095:
+        return "limit_up_chain"
+    recent_high = max(highs[max(0, end - 19) : end + 1])
+    near_high = recent_high > 0 and closes[end] >= recent_high * 0.97
+    if (momentum20 >= 0.12 and near_high) or (
+        daily_return >= 0.055 and volume_ratio >= 1.20
+    ):
+        return "main_rise"
+    return "normal_trend"
+
+
+def _mfi_filter(mfi14: float, regime: str) -> dict[str, Any]:
+    """Return style-aware MFI thresholds and a bounded score adjustment."""
+    if regime == "limit_up_chain":
+        lower, upper = MFI_LIMIT_UP_MIN, None
+        passed = mfi14 >= lower
+        score_delta = 5.0 if mfi14 >= 65.0 else (3.0 if passed else -10.0)
+        label = "涨停/连板"
+    elif regime == "main_rise":
+        lower, upper = MFI_MAIN_RISE_MIN, None
+        passed = mfi14 >= lower
+        score_delta = 3.0 if mfi14 >= 50.0 else (1.0 if passed else -8.0)
+        label = "主升"
+    else:
+        lower, upper = MFI_NORMAL_MIN, MFI_NORMAL_MAX
+        passed = lower <= mfi14 <= upper
+        score_delta = (
+            3.0
+            if 45.0 <= mfi14 <= 75.0
+            else (1.0 if passed else (-8.0 if mfi14 < lower else -5.0))
+        )
+        label = "普通趋势"
+    upper_text = "无上限" if upper is None else f"{upper:.0f}"
+    return {
+        "passed": passed,
+        "regime": regime,
+        "regime_label": label,
+        "period": MFI_PERIOD,
+        "value": round(mfi14, 2),
+        "minimum": lower,
+        "maximum": upper,
+        "score_delta": score_delta,
+        "reason": (
+            f"{label} MFI14={mfi14:.1f}，阈值 {lower:.0f}–{upper_text}"
+            + ("，资金流确认" if passed else "，资金流未确认")
+        ),
+    }
 
 
 def _atr(candles: list[dict[str, Any]], period: int = 14) -> float:
@@ -793,7 +1000,11 @@ def _analyze_series(series: dict[str, Any]) -> dict[str, Any]:
         for item in list(series.get("volume") or [])
     }
     closes = [_float(candle.get("close")) for candle in candles]
+    highs = [_float(candle.get("high")) for candle in candles]
+    lows = [_float(candle.get("low")) for candle in candles]
     volumes = [volume_by_time.get(str(candle.get("time")), 0.0) for candle in candles]
+    latest_feature_values = _feature_row(closes, volumes, len(closes) - 1)
+    feature_names = list(_llm_submodule("traditional").FEATURE_NAMES)
     close = closes[-1]
     ma5 = _mean(closes[-5:])
     ma20 = _mean(closes[-20:])
@@ -804,6 +1015,16 @@ def _analyze_series(series: dict[str, Any]) -> dict[str, Any]:
     volume5 = _mean(volumes[-5:])
     volume20 = _mean(volumes[-20:])
     volume_ratio = volume5 / volume20 if volume20 else 1.0
+    mfi14 = _money_flow_index(candles, volumes)
+    mfi_regime = _mfi_regime(
+        closes,
+        highs,
+        volumes,
+        len(closes) - 1,
+        momentum20=momentum20,
+        volume_ratio=volume_ratio,
+    )
+    mfi_filter = _mfi_filter(mfi14, mfi_regime)
     recent_high20 = max(closes[-20:]) if len(closes) >= 20 else close
     recent_low20 = min(closes[-20:]) if len(closes) >= 20 else close
     returns20 = [
@@ -820,6 +1041,7 @@ def _analyze_series(series: dict[str, Any]) -> dict[str, Any]:
         closes, volumes
     )
     next_day = probability_result["probabilities"]["next_trading_day"]
+    next_five_days = probability_result["probabilities"]["next_5_trading_days"]
     probability = next_day.get("value")
     validation_accuracy = (next_day.get("validation") or {}).get("accuracy")
     training_samples = next_day.get("training_samples", 0)
@@ -830,10 +1052,31 @@ def _analyze_series(series: dict[str, Any]) -> dict[str, Any]:
     score += 8.0 if ma20 > ma60 else -8.0
     score += 5.0 if 45.0 <= rsi14 <= 70.0 else (-6.0 if rsi14 >= 80.0 else 0.0)
     score += _clip((volume_ratio - 1.0) * 5.0, -5.0, 5.0)
+    score += _float(mfi_filter.get("score_delta"))
     score = round(_clip(score, 0.0, 100.0), 1)
+    swing_score = _llm_submodule("traditional").swing_composite_score(
+        score,
+        probability,
+        next_five_days.get("value"),
+        next_day.get("validation"),
+        next_five_days.get("validation"),
+    )
+    probability_reliability = {
+        "next_trading_day": _llm_submodule("traditional").probability_reliability(
+            next_day.get("validation")
+        ),
+        "next_5_trading_days": _llm_submodule("traditional").probability_reliability(
+            next_five_days.get("validation")
+        ),
+    }
     atr14 = _atr(candles)
-    recent_high20 = max(_float(candle.get("high")) for candle in candles[-20:])
-    recent_low20 = min(_float(candle.get("low")) for candle in candles[-20:])
+    recent_high20 = max(highs[-20:])
+    recent_low20 = min(lows[-20:])
+    limit_up_days_5 = sum(
+        1
+        for index in range(max(1, len(closes) - 5), len(closes))
+        if _return(closes, index, 1) >= 0.095
+    )
     resistance_candidates = [
         level for level in (ma5, ma20, ma60, recent_high20) if level > close * 1.001
     ]
@@ -876,6 +1119,10 @@ def _analyze_series(series: dict[str, Any]) -> dict[str, Any]:
         "momentum60": momentum60,
         "rsi14": rsi14,
         "volume_ratio": volume_ratio,
+        "mfi14": mfi14,
+        "mfi_regime": mfi_regime,
+        "mfi_filter": mfi_filter,
+        "limit_up_days_5": limit_up_days_5,
         "trend_strength": ma20 / ma60 - 1.0 if ma60 else 0.0,
         "volatility20": volatility20,
         "breakout20": close / recent_high20 - 1.0 if recent_high20 else 0.0,
@@ -885,12 +1132,15 @@ def _analyze_series(series: dict[str, Any]) -> dict[str, Any]:
         "resistance_price": resistance_price,
         "support_price": support_price,
         "selection_score": score,
+        "swing_score": swing_score,
+        "probability_reliability": probability_reliability,
         "up_probability": probability,
         "probabilities": probability_result["probabilities"],
         "assessment_status": probability_result["assessment_status"],
         "unavailable_reason": next_day.get("unavailable_reason"),
         "validation_accuracy": validation_accuracy,
         "training_samples": training_samples,
+        "model_features": dict(zip(feature_names, latest_feature_values or [])),
         "trend": trend,
         "trend_direction": trend_direction,
     }
@@ -925,9 +1175,32 @@ def _pool_signals(
         candidates.append({"item": item, "analysis": analysis})
 
     candidates.sort(
-        key=lambda candidate: _float(candidate["analysis"].get("selection_score")),
+        key=lambda candidate: _float(
+            candidate["analysis"].get("swing_score"),
+            _float(candidate["analysis"].get("selection_score")),
+        ),
         reverse=True,
     )
+    sector_scores: dict[str, list[float]] = {}
+    for candidate in candidates:
+        item = candidate["item"]
+        sector = str(
+            item.get("sector_name")
+            or item.get("sector")
+            or _local_sector_name(str(item.get("symbol") or ""), item.get("name"))
+            or "未分类"
+        )
+        sector_scores.setdefault(sector, []).append(
+            _float(
+                candidate["analysis"].get("swing_score"),
+                _float(candidate["analysis"].get("selection_score")),
+            )
+        )
+    sector_strength = {
+        sector: round(statistics.fmean(values), 3)
+        for sector, values in sector_scores.items()
+        if values
+    }
     signals: list[dict[str, Any]] = []
     for rank, candidate in enumerate(candidates, start=1):
         item = candidate["item"]
@@ -938,15 +1211,33 @@ def _pool_signals(
         close = _float(analysis.get("close"), _float(item.get("current_price")))
         current_price = _float(item.get("current_price"), close) or close
         score = _float(analysis.get("selection_score"))
+        probabilities = analysis.get("probabilities") or {}
         probability_value = analysis.get("up_probability")
         probability = (
             _float(probability_value) if probability_value is not None else None
+        )
+        five_day_value = (probabilities.get("next_5_trading_days") or {}).get("value")
+        five_day_probability = (
+            _float(five_day_value) if five_day_value is not None else None
+        )
+        swing_score = _float(
+            analysis.get("swing_score"),
+            _llm_submodule("traditional").swing_composite_score(
+                score, probability, five_day_probability
+            ),
         )
         momentum20 = _float(analysis.get("momentum20"))
         ma5 = _float(analysis.get("ma5"))
         ma20 = _float(analysis.get("ma20"))
         ma60 = _float(analysis.get("ma60"))
         atr14 = _float(analysis.get("atr14"))
+        mfi14 = _float(analysis.get("mfi14"), 50.0)
+        mfi_filter = dict(analysis.get("mfi_filter") or {})
+        mfi_passed = bool(mfi_filter.get("passed", True))
+        pre_mfi_score = score - _float(mfi_filter.get("score_delta"))
+        pre_mfi_swing_score = _llm_submodule("traditional").swing_composite_score(
+            pre_mfi_score, probability, five_day_probability
+        )
         entry_price = _float(position.get("entry_price")) if position else 0.0
         position_return = current_price / entry_price - 1.0 if entry_price > 0 else 0.0
 
@@ -956,7 +1247,11 @@ def _pool_signals(
             hard_stop = entry_price > 0 and position_return <= -0.08
             trend_exit = current_price < ma60 and momentum20 < 0
             model_exit = (
-                probability is not None and probability <= 0.40 and current_price < ma20
+                probability is not None
+                and five_day_probability is not None
+                and probability <= 0.40
+                and five_day_probability <= 0.46
+                and current_price < ma20
             )
             if hard_stop or trend_exit or model_exit:
                 action = "止损" if hard_stop else ("清仓" if trend_exit else "减仓")
@@ -970,39 +1265,61 @@ def _pool_signals(
                     )
                 )
             elif (
-                score >= ADD_SCORE_THRESHOLD
+                swing_score >= SWING_ADD_SCORE_THRESHOLD
                 and probability is not None
-                and probability >= ADD_PROBABILITY_THRESHOLD
+                and probability >= 0.58
+                and five_day_probability is not None
+                and five_day_probability >= SWING_ADD_FIVE_DAY_PROBABILITY_THRESHOLD
                 and current_price > ma20 > ma60
+                and mfi_passed
             ):
                 action = "加仓"
-                trigger = "高评分、上涨概率与多头排列共振"
+                trigger = "波段综合分、1日/5日上涨概率、多头排列与 MFI 共振"
             else:
                 action = "持有"
                 trigger = "持仓未触发止损或加仓条件"
         elif (
-            score >= STRONG_BUY_SCORE_THRESHOLD
+            swing_score >= SWING_STRONG_BUY_SCORE_THRESHOLD
             and probability is not None
-            and probability >= STRONG_BUY_PROBABILITY_THRESHOLD
+            and probability >= 0.56
+            and five_day_probability is not None
+            and five_day_probability >= SWING_STRONG_FIVE_DAY_PROBABILITY_THRESHOLD
             and current_price > ma20 > ma60
+            and mfi_passed
         ):
             action = "买入"
-            trigger = "达到强势买入阈值，评分、概率与多头排列共振"
+            trigger = "达到强势波段阈值，综合分、双周期概率、多头排列与 MFI 共振"
         elif (
-            score >= BUY_SCORE_THRESHOLD
+            swing_score >= SWING_BUY_SCORE_THRESHOLD
             and probability is not None
-            and probability >= BUY_PROBABILITY_THRESHOLD
+            and probability >= 0.52
+            and five_day_probability is not None
+            and five_day_probability >= SWING_BUY_FIVE_DAY_PROBABILITY_THRESHOLD
+            and current_price > ma20
+            and mfi_passed
+        ):
+            action = "买入"
+            trigger = "达到普通波段阈值，综合分、1日/5日概率与 MFI 同步转强"
+        elif (
+            not mfi_passed
+            and pre_mfi_swing_score >= SWING_BUY_SCORE_THRESHOLD
+            and probability is not None
+            and probability >= 0.52
+            and five_day_probability is not None
+            and five_day_probability >= SWING_BUY_FIVE_DAY_PROBABILITY_THRESHOLD
             and current_price > ma20
         ):
-            action = "买入"
-            trigger = "达到普通买入阈值，评分与上涨概率同步转强"
+            action = "等待买入"
+            trigger = f"价格与概率达标，但 {mfi_filter.get('reason') or 'MFI 资金流未确认'}"
         elif (
-            score >= WATCH_SCORE_THRESHOLD
+            swing_score >= SWING_WATCH_SCORE_THRESHOLD
             and probability is not None
-            and probability >= WATCH_PROBABILITY_THRESHOLD
+            and probability >= 0.49
+            and five_day_probability is not None
+            and five_day_probability >= SWING_WATCH_FIVE_DAY_PROBABILITY_THRESHOLD
         ):
             action = "等待买入"
-            trigger = "达到候选关注阈值，等待价格趋势进一步确认"
+            trigger = "双周期概率已转强，等待价格趋势进一步确认"
 
         validation_accuracy = analysis.get("validation_accuracy")
         validation_text = (
@@ -1013,8 +1330,11 @@ def _pool_signals(
         stop_price = max(0.0, current_price - max(2.0 * atr14, current_price * 0.06))
         take_profit = current_price + max(3.0 * atr14, current_price * 0.10)
         reason = (
-            f"{trigger}；20日动量 {momentum20:+.1%} · {analysis.get('trend', '趋势未知')}"
-            f"{validation_text} · 风险参考 {stop_price:.2f}/{take_profit:.2f}"
+            f"{trigger}；波段综合分 {swing_score:.1f}（技术分 {score:.1f}）"
+            f" · 1日/5日概率 {probability if probability is not None else '—'}/"
+            f"{five_day_probability if five_day_probability is not None else '—'}"
+            f" · 20日动量 {momentum20:+.1%} · {analysis.get('trend', '趋势未知')}"
+            f" · MFI14 {mfi14:.1f}{validation_text} · 风险参考 {stop_price:.2f}/{take_profit:.2f}"
         )
         resistance_price = _float(analysis.get("resistance_price"), take_profit)
         support_price = _float(analysis.get("support_price"), stop_price)
@@ -1050,7 +1370,7 @@ def _pool_signals(
                     "quantity": quantity,
                     "price": round(suggested_price, 3),
                     "strategy_id": "review_center_momentum_logit_v1",
-                    "tag": f"score={score:.1f};up_probability={probability if probability is not None else 'null'}",
+                    "tag": f"swing_score={swing_score:.1f};technical_score={score:.1f};up_probability_1d={probability if probability is not None else 'null'};up_probability_5d={five_day_probability if five_day_probability is not None else 'null'};mfi14={mfi14:.1f}",
                 }
         direction = (
             analysis.get("trend_direction") or analysis.get("trend") or "趋势未知"
@@ -1080,6 +1400,12 @@ def _pool_signals(
         signal = {
             "symbol": symbol,
             "name": item.get("name", symbol),
+            "sector_name": str(
+                item.get("sector_name")
+                or item.get("sector")
+                or _local_sector_name(symbol, item.get("name"))
+                or "未分类"
+            ),
             "pool": "持仓" if holding else "观察",
             "action": action,
             "current_price": round(current_price, 3),
@@ -1088,8 +1414,18 @@ def _pool_signals(
             ),
             "selection_rank": rank,
             "selection_score": score,
+            "swing_score": swing_score,
+            "sector_strength": sector_strength.get(
+                str(
+                    item.get("sector_name")
+                    or item.get("sector")
+                    or _local_sector_name(symbol, item.get("name"))
+                    or "未分类"
+                ),
+                0.0,
+            ),
             "up_probability": probability,
-            "probabilities": analysis.get("probabilities") or {},
+            "probabilities": probabilities,
             "assessment_status": analysis.get("assessment_status"),
             "unavailable_reason": analysis.get("unavailable_reason"),
             "validation_accuracy": validation_accuracy,
@@ -1100,6 +1436,10 @@ def _pool_signals(
             "ma60": ma60,
             "rsi14": _float(analysis.get("rsi14")),
             "volume_ratio": _float(analysis.get("volume_ratio")),
+            "mfi14": mfi14,
+            "mfi_regime": analysis.get("mfi_regime"),
+            "mfi_filter": mfi_filter,
+            "limit_up_days_5": int(_float(analysis.get("limit_up_days_5"))),
             "trend_strength": _float(analysis.get("trend_strength")),
             "volatility20": _float(analysis.get("volatility20")),
             "breakout20": _float(analysis.get("breakout20")),
@@ -1188,6 +1528,12 @@ def _secid(symbol: str) -> str:
 def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     query = urlencode({key: str(value) for key, value in params.items()})
     target = f"{url}?{query}"
+    is_tencent = "gtimg.cn" in url or "qq.com" in url
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+    referer = "https://gu.qq.com/" if is_tencent else "https://quote.eastmoney.com/"
     # curl reaches Tencent and most Eastmoney endpoints much faster than a
     # fresh PowerShell process.  Retain PowerShell as a Windows fallback for
     # endpoints which occasionally close curl's TLS connection.
@@ -1195,7 +1541,13 @@ def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     if curl:
         try:
             completed = subprocess.run(
-                [curl, "-sS", "-L", "--max-time", "15", "-A", "Mozilla/5.0", target],
+                [
+                    curl, "-sS", "-L", "--max-time", "15",
+                    "-A", user_agent,
+                    "-H", f"Referer: {referer}",
+                    "-H", "Accept: application/json,text/plain,*/*",
+                    target,
+                ],
                 capture_output=True,
                 check=True,
                 timeout=18,
@@ -1208,8 +1560,11 @@ def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
             command = (
                 "$OutputEncoding = [Console]::OutputEncoding = "
                 "(New-Object System.Text.UTF8Encoding); "
+                "$headers=@{'User-Agent'='" + user_agent + "';"
+                "'Referer'='" + referer + "';"
+                "'Accept'='application/json,text/plain,*/*'}; "
                 "(Invoke-WebRequest -UseBasicParsing "
-                f"-Uri '{target}' -TimeoutSec 15).Content"
+                f"-Uri '{target}' -Headers $headers -TimeoutSec 15).Content"
             )
             completed = subprocess.run(
                 [
@@ -1231,11 +1586,11 @@ def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
         request = Request(
             target,
             headers={
-                "User-Agent": "Mozilla/5.0 AKQuant-Review-Center",
+                "User-Agent": user_agent,
                 "Accept": "application/json,text/plain,*/*",
                 "Accept-Encoding": "identity",
                 "Connection": "close",
-                "Referer": "https://quote.eastmoney.com/",
+                "Referer": referer,
             },
         )
         try:
@@ -1354,6 +1709,7 @@ def _stock_kline_eastmoney(symbol: str) -> dict[str, Any]:
         "region_name": _repair_text(quote.get("f128")) or None,
         "concept_names": _repair_text(quote.get("f129")) or None,
         "updated_at": last["time"],
+        "quote_source": "Eastmoney public market API",
         "series": {
             "symbol": code,
             "candles": [
@@ -1409,20 +1765,16 @@ def _stock_kline_tencent(symbol: str) -> dict[str, Any]:
     previous = rows[-2] if len(rows) > 1 else None
     previous_price = previous["close"] if previous else 0.0
     previous_volume = previous["value"] if previous else 0.0
-    try:
-        quote = (
-            _get_json(
-                EASTMONEY_QUOTE,
-                {
-                    "secid": _secid(code),
-                    "fields": "f57,f58,f43,f47,f48,f60,f170,f127,f128,f129",
-                },
-            ).get("data")
-            or {}
-        )
-    except Exception:  # noqa: BLE001 - daily K line remains available without quote
-        quote = {}
-    name = _repair_text(quote.get("f58") or code, code)
+    # Tencent includes a compact quote array in the same response.  Reading it
+    # avoids coupling this fallback back to Eastmoney, which can itself be the
+    # failed provider that caused us to reach Tencent.
+    quote_values = list((data.get("qt") or {}).get(f"{market}{code}") or [])
+    quote = {
+        "name": quote_values[1] if len(quote_values) > 1 else None,
+        "current": quote_values[3] if len(quote_values) > 3 else None,
+        "previous": quote_values[4] if len(quote_values) > 4 else None,
+    }
+    name = _repair_text(quote.get("name") or code, code)
     if name == code or name.isdigit():
         try:
             matches = stock_search(code)
@@ -1434,29 +1786,26 @@ def _stock_kline_tencent(symbol: str) -> dict[str, Any]:
     return {
         "symbol": code,
         "name": name,
-        "current_price": _float(quote.get("f43"), last["close"] * 100.0) / 100.0,
+        "current_price": _float(quote.get("current"), last["close"]),
         "previous_price": (
-            _float(quote.get("f60")) / 100.0
-            if quote.get("f60") is not None
+            _float(quote.get("previous"))
+            if quote.get("previous") is not None
             else previous_price
         ),
         "change_pct": (
-            _float(quote.get("f170")) / 100.0
-            if quote.get("f170") is not None
-            else (
-                (last["close"] / previous_price - 1.0) * 100.0
-                if previous_price
-                else 0.0
-            )
+            (last["close"] / previous_price - 1.0) * 100.0
+            if previous_price
+            else 0.0
         ),
         "volume": last["value"],
         "volume_change_pct": (
             (last["value"] / previous_volume - 1.0) * 100.0 if previous_volume else 0.0
         ),
-        "sector_name": _repair_text(quote.get("f127")) or None,
-        "region_name": _repair_text(quote.get("f128")) or None,
-        "concept_names": _repair_text(quote.get("f129")) or None,
+        "sector_name": None,
+        "region_name": None,
+        "concept_names": None,
         "updated_at": last["time"],
+        "quote_source": "Tencent fqkline API",
         "series": {
             "symbol": code,
             "candles": [
@@ -1482,6 +1831,169 @@ def _stock_kline_tencent(symbol: str) -> dict[str, Any]:
     }
 
 
+def _stock_kline_miaoxiang(symbol: str) -> dict[str, Any]:
+    """Fetch daily OHLCV from the first-priority 妙想 read-only MCP tool.
+
+    The MCP response is a semantic table: dates are columns and OHLCV fields
+    are rows.  We normalize that table into the same series shape used by the
+    market-data fallbacks.  If 妙想 is unavailable or returns no complete
+    OHLCV table, the caller deliberately falls through to Tencent.
+    """
+    service = _get_ai_service()
+    config = service.config.miaoxiang
+    tool_name = "mx_ashare_finance_data"
+    if not (config.enabled and config.em_api_key and tool_name in config.read_tool_allowlist):
+        raise RuntimeError("妙想 MCP 未启用或个股行情工具不在只读白名单")
+    code = _code(symbol)
+    client = _llm_submodule("miaoxiang").MiaoxiangClient(config)
+    last_error: Exception | None = None
+    response = None
+    for attempt in range(2):
+        try:
+            response = asyncio.run(client.call_tool(
+                tool_name,
+                {"query": f"查询{code}最近360个交易日的日线开盘价、最高价、最低价、收盘价、成交量"},
+            ))
+            break
+        except Exception as exc:  # noqa: BLE001 - retry transient MCP disconnects
+            last_error = exc
+            if attempt == 0:
+                time.sleep(0.25)
+    if response is None:
+        raise last_error or RuntimeError("妙想 MCP 未返回个股行情")
+    payload = _mcp_json(response) or {}
+    date_re = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+    def number(value: Any) -> float | None:
+        text = _repair_text(value).replace(",", "").strip()
+        if not text:
+            return None
+        multiplier = 1.0
+        if "亿" in text:
+            multiplier = 100000000.0
+        elif "万" in text:
+            multiplier = 10000.0
+        match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+        return float(match.group(0)) * multiplier if match else None
+
+    field_aliases = {
+        "open": ("开盘价", "开盘"),
+        "high": ("最高价", "最高"),
+        "low": ("最低价", "最低"),
+        "close": ("收盘价", "收盘"),
+        "value": ("成交量", "成交额", "成交"),
+    }
+    rows_by_date: dict[str, dict[str, float]] = {}
+    for table in list(payload.get("data") or []):
+        if not isinstance(table, dict):
+            continue
+        columns = [_repair_text(v) for v in list(table.get("columns") or [])]
+        date_positions = {
+            idx: match.group(1)
+            for idx, column in enumerate(columns)
+            if (match := date_re.search(column))
+        }
+        if len(date_positions) < 20:
+            continue
+        for raw_row in list(table.get("items") or []):
+            if not isinstance(raw_row, list) or not raw_row:
+                continue
+            label = _repair_text(raw_row[0])
+            field = next(
+                (name for name, aliases in field_aliases.items()
+                 if any(alias in label for alias in aliases)),
+                None,
+            )
+            if field is None:
+                continue
+            for index, date in date_positions.items():
+                parsed = number(raw_row[index]) if index < len(raw_row) else None
+                if parsed is not None:
+                    rows_by_date.setdefault(date, {})[field] = parsed
+    rows = []
+    for date, values in sorted(rows_by_date.items()):
+        if not all(key in values for key in ("open", "high", "low", "close", "value")):
+            continue
+        rows.append({"time": date, **values, "change_pct": 0.0})
+    if len(rows) < 30:
+        raise ValueError(f"妙想未返回 {code} 的完整日线 OHLCV")
+    for index in range(1, len(rows)):
+        previous = rows[index - 1]["close"]
+        rows[index]["change_pct"] = (rows[index]["close"] / previous - 1.0) * 100.0 if previous else 0.0
+    last, previous = rows[-1], rows[-2]
+    return {
+        "symbol": code,
+        "name": code,
+        "current_price": last["close"],
+        "previous_price": previous["close"],
+        "change_pct": last["change_pct"],
+        "volume": last["value"],
+        "volume_change_pct": (last["value"] / previous["value"] - 1.0) * 100.0 if previous["value"] else 0.0,
+        "sector_name": None,
+        "updated_at": last["time"],
+        "quote_source": "妙想:mx_ashare_finance_data",
+        "series": {
+            "symbol": code,
+            "candles": [{"time": row["time"], "open": row["open"], "high": row["high"], "low": row["low"], "close": row["close"]} for row in rows],
+            "volume": [{"time": row["time"], "value": row["value"], "up": row["close"] >= row["open"]} for row in rows],
+            "markers": [],
+        },
+    }
+
+
+def _stock_kline_sina(symbol: str) -> dict[str, Any]:
+    """Fetch the full daily OHLCV window from Sina's public API.
+
+    Tencent currently returns a WAF 501 page and Eastmoney may close TLS
+    connections under burst load. Sina provides the same full daily window,
+    so this repairs provider availability without reducing the universe or
+    using synthetic/shortened data.
+    """
+    code = _code(symbol)
+    market = "sh" if code.startswith(("5", "6", "9")) else "sz"
+    payload = _get_json(
+        SINA_KLINE,
+        {"symbol": f"{market}{code}", "scale": 240, "ma": "no", "datalen": KLINE_HISTORY_DAYS},
+    )
+    if not isinstance(payload, list) or not payload:
+        raise ValueError(f"未找到 {symbol} 的 Sina 日线行情")
+    rows = []
+    for raw in payload:
+        if not isinstance(raw, dict):
+            continue
+        row = {
+            "time": str(raw.get("day") or ""),
+            "open": _float(raw.get("open")), "close": _float(raw.get("close")),
+            "high": _float(raw.get("high")), "low": _float(raw.get("low")),
+            "value": _float(raw.get("volume")), "change_pct": 0.0,
+        }
+        if row["time"] and row["close"] > 0:
+            rows.append(row)
+    if not rows:
+        raise ValueError(f"未找到 {symbol} 的有效 Sina 日线行情")
+    for index in range(1, len(rows)):
+        previous = rows[index - 1]["close"]
+        rows[index]["change_pct"] = (rows[index]["close"] / previous - 1.0) * 100.0 if previous else 0.0
+    last = rows[-1]
+    previous = rows[-2] if len(rows) > 1 else None
+    previous_volume = _float(previous["value"]) if previous else 0.0
+    return {
+        "symbol": code, "name": code,
+        "current_price": last["close"],
+        "previous_price": previous["close"] if previous else last["close"],
+        "change_pct": last["change_pct"], "volume": last["value"],
+        "volume_change_pct": (last["value"] / previous_volume - 1.0) * 100.0 if previous_volume else 0.0,
+        "sector_name": None, "updated_at": last["time"],
+        "quote_source": "Sina CN_MarketData API",
+        "series": {
+            "symbol": code,
+            "candles": [{"time": r["time"], "open": r["open"], "high": r["high"], "low": r["low"], "close": r["close"]} for r in rows],
+            "volume": [{"time": r["time"], "value": r["value"], "up": r["close"] >= r["open"]} for r in rows],
+            "markers": [],
+        },
+    }
+
+
 def stock_kline(symbol: str, refresh: bool = False) -> dict[str, Any]:
     """Return a short-lived cached quote/K-line payload for one A-share."""
     code = _code(symbol)
@@ -1491,10 +2003,17 @@ def stock_kline(symbol: str, refresh: bool = False) -> dict[str, Any]:
             cached = _STOCK_KLINE_CACHE.get(code)
         if cached and now - cached[0] < QUOTE_CACHE_TTL_SECONDS:
             return cached[1]
-    try:
-        result = _stock_kline_tencent(code)
-    except Exception:
-        result = _stock_kline_eastmoney(code)
+    errors: list[str] = []
+    # 妙想 MCP is the authoritative first choice.  Tencent is the first
+    # market-data fallback; Eastmoney/Sina remain additional resilience paths.
+    for provider in (_stock_kline_miaoxiang, _stock_kline_tencent, _stock_kline_eastmoney, _stock_kline_sina):
+        try:
+            result = provider(code)
+            break
+        except Exception as exc:  # noqa: BLE001 - retain provider diagnostics
+            errors.append(f"{provider.__name__}: {exc}")
+    else:
+        raise RuntimeError(f"行情接口均失败({code}): {' | '.join(errors)}")
     with _STOCK_KLINE_CACHE_LOCK:
         _STOCK_KLINE_CACHE[code] = (now, result)
     return result
@@ -2140,11 +2659,20 @@ def _review_baseline_backtest(
             ma5 = sum(item["close"] for item in bars[-5:]) / 5.0
             ma20 = sum(item["close"] for item in bars[-20:]) / 20.0
             momentum20 = row["close"] / bars[-21]["close"] - 1.0 if bars[-21]["close"] > 0 else 0.0
-            if row["close"] > ma5 > ma20 and momentum20 > 0:
+            # Compact historical replay of the live ensemble: trend is the
+            # hard gate, while breakout/pullback or 3-day momentum confirms
+            # timing.  This intentionally remains short/ultra-short.
+            recent_high20 = max(item["high"] for item in bars[-20:])
+            breakout_ok = row["close"] >= recent_high20 * (1.0 - 0.02)
+            pullback_ok = ma5 > ma20 and ma5 <= row["close"] <= ma5 * (1.0 + 0.05)
+            regime_momentum = row["close"] / bars[-4]["close"] - 1.0 if len(bars) >= 4 and bars[-4]["close"] > 0 else 0.0
+            momentum_ok = regime_momentum >= 0.0
+            vote_score = 0.40 + (0.30 if breakout_ok or pullback_ok else 0.0) + (0.30 if momentum_ok else 0.0)
+            if row["close"] > ma5 > ma20 and momentum20 > 0 and vote_score >= MODEL_ENSEMBLE_ENTRY_THRESHOLD and (breakout_ok or pullback_ok or momentum_ok):
                 candidates.append((momentum20, symbol, row))
         candidates.sort(reverse=True)
         for _, symbol, row in candidates:
-            if len(holdings) >= 5:
+            if len(holdings) >= MAX_LOCAL_POSITIONS:
                 break
             equity_now = cash + sum(by_date[item].get(as_of, {}).get("close", position["price"]) * position["quantity"] for item, position in holdings.items())
             execution_price = row["close"] * (1.0 + slippage_rate)
@@ -2178,7 +2706,7 @@ def _review_baseline_backtest(
     annual_return = (values[-1] / initial) ** (252.0 / periods) - 1.0 if values[-1] > 0 else -1.0
     sells = [item for item in trades if item["action"] == "sell"]
     summary = {"initial_equity": round(initial, 2), "final_equity": round(values[-1], 2), "total_return_pct": round((values[-1] / initial - 1.0) * 100.0, 4), "annualized_return_pct": round(annual_return * 100.0, 4), "max_drawdown_pct": round(max_drawdown * 100.0, 4), "sharpe_ratio": round((mean_return / volatility) * math.sqrt(252.0), 4) if volatility > 1e-12 else 0.0, "sortino_ratio": round((mean_return / downside_deviation) * math.sqrt(252.0), 4) if downside_deviation > 1e-12 else 0.0, "calmar_ratio": round(annual_return / abs(max_drawdown), 4) if max_drawdown < -1e-12 else 0.0, "volatility_pct": round(volatility * math.sqrt(252.0) * 100.0, 4), "trade_count": len(trades), "completed_trade_count": len(sells), "win_rate": round(sum(1 for item in sells if item["net_pnl"] > 0) / max(1, len(sells)) * 100.0, 4)}
-    return {"status": "valid", "strategy": "short_term_trend_baseline_v1", "window": {"start": dates[0], "end": dates[-1], "calendar_days": calendar_days}, "symbols": symbols, "errors": errors, "assumptions": {"initial_equity": initial, "entry_weight": 0.10, "max_positions": 5, "commission_rate": commission_rate, "stamp_tax_rate": stamp_tax_rate, "slippage_rate": slippage_rate, "lot_size": 100}, "summary": summary, "equity_curve": curve, "trades": trades}
+    return {"status": "valid", "strategy": "short_term_trend_baseline_v1", "model_mode": "weighted_vote", "model_ensemble_version": MODEL_ENSEMBLE_VERSION, "window": {"start": dates[0], "end": dates[-1], "calendar_days": calendar_days}, "symbols": symbols, "errors": errors, "assumptions": {"initial_equity": initial, "entry_weight": 0.10, "max_positions": MAX_LOCAL_POSITIONS, "commission_rate": commission_rate, "stamp_tax_rate": stamp_tax_rate, "slippage_rate": slippage_rate, "lot_size": 100, "ensemble_weights": dict(MODEL_ENSEMBLE_WEIGHTS), "ensemble_entry_threshold": MODEL_ENSEMBLE_ENTRY_THRESHOLD, "trend_required": True, "confirmation_required": 1}, "summary": summary, "equity_curve": curve, "trades": trades}
 
 
 def _research_pool_items(
@@ -2228,18 +2756,459 @@ def _research_pool_items(
     return rendered
 
 
+def _csi300_constituents() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Load the current CSI 300 membership with an auditable effective date."""
+    import akshare as ak
+
+    frame = ak.index_stock_cons_csindex(symbol="000300")
+    if frame is None or frame.empty:
+        raise ValueError("沪深300成分股接口未返回数据")
+    symbol_index: int | None = None
+    best_distinct = 0
+    for index in range(len(frame.columns)):
+        values = [str(value).strip() for value in frame.iloc[:, index].tolist()]
+        valid = [value for value in values if re.fullmatch(r"\d{6}", value)]
+        distinct = len(set(valid))
+        if len(valid) >= max(250, int(len(values) * 0.9)) and distinct > best_distinct:
+            symbol_index = index
+            best_distinct = distinct
+    if symbol_index is None:
+        raise ValueError("无法识别沪深300成分股代码列")
+    name_index = min(symbol_index + 1, len(frame.columns) - 1)
+    items: list[dict[str, Any]] = []
+    for row_index in range(len(frame)):
+        symbol = _code(str(frame.iloc[row_index, symbol_index]))
+        if not symbol:
+            continue
+        name = _repair_text(frame.iloc[row_index, name_index], symbol)
+        items.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "sector_name": "沪深300成分股",
+                "universe": "csi300",
+            }
+        )
+    items = list({item["symbol"]: item for item in items}.values())
+    if len(items) < 250:
+        raise ValueError(f"沪深300成分股有效代码不足: {len(items)}")
+    effective_date = str(frame.iloc[0, 0])[:10] if len(frame.columns) else None
+    return items, {
+        "name": "沪深300",
+        "code": "000300",
+        "source": "AKShare index_stock_cons_csindex",
+        "effective_date": effective_date,
+        "constituent_count": len(items),
+        "membership_mode": "current_membership_applied_to_recent_window",
+    }
+
+
+def _csi300_research_items(
+    *, refresh: bool = True
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch CSI 300 daily K-lines concurrently for historical ML replay."""
+    constituents, metadata = _csi300_constituents()
+
+    def load_item(item: dict[str, Any]) -> dict[str, Any]:
+        try:
+            quote = stock_kline(str(item["symbol"]), refresh=refresh)
+            return {
+                **item,
+                "name": _repair_text(quote.get("name"), str(item.get("name") or item["symbol"])),
+                "_ai_series": dict(quote.get("series") or {}),
+            }
+        except Exception as exc:  # noqa: BLE001 - retain per-symbol audit
+            return {**item, "quote_error": str(exc)}
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        rendered = list(executor.map(load_item, constituents))
+    metadata["loaded_count"] = sum(not item.get("quote_error") for item in rendered)
+    metadata["error_count"] = sum(bool(item.get("quote_error")) for item in rendered)
+    return rendered, metadata
+
+
+def _csi300_plus_watchlist_research_items(
+    state: dict[str, Any], *, refresh: bool = True
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return the de-duplicated union of current CSI 300 and local watchlist.
+
+    The watchlist is deliberately additive: current CSI 300 membership remains
+    the broad research universe while locally curated names are retained even
+    when they are outside the index.  Every item is fetched from the same
+    point-in-time daily K-line source so downstream replay and simulation use
+    one consistent data contract.
+    """
+    csi_items, csi_metadata = _csi300_research_items(refresh=refresh)
+    merged: dict[str, dict[str, Any]] = {
+        str(item.get("symbol")): dict(item)
+        for item in csi_items
+        if item.get("symbol")
+    }
+    watchlist_symbols = {
+        _code(str(item.get("symbol") or "")): dict(item)
+        for item in (state.get("watchlist") or [])
+        if _code(str(item.get("symbol") or ""))
+    }
+    extra_symbols = [symbol for symbol in watchlist_symbols if symbol not in merged]
+
+    def load_extra(symbol: str) -> dict[str, Any]:
+        source = watchlist_symbols[symbol]
+        try:
+            quote = stock_kline(symbol, refresh=refresh)
+            return {
+                **source,
+                "symbol": symbol,
+                "name": _repair_text(quote.get("name"), str(source.get("name") or symbol)),
+                "sector_name": source.get("sector_name") or quote.get("sector_name"),
+                "universe": "watchlist",
+                "_ai_series": dict(quote.get("series") or {}),
+            }
+        except Exception as exc:  # noqa: BLE001 - retain per-symbol audit
+            return {**source, "symbol": symbol, "universe": "watchlist", "quote_error": str(exc)}
+
+    if extra_symbols:
+        with ThreadPoolExecutor(max_workers=min(12, len(extra_symbols))) as executor:
+            for item in executor.map(load_extra, extra_symbols):
+                merged[str(item.get("symbol"))] = item
+
+    metadata = {
+        **csi_metadata,
+        "name": "沪深300+观察池",
+        "code": "csi300_plus_watchlist",
+        "source": "AKShare index_stock_cons_csindex + local_review_center_state.watchlist",
+        "membership_mode": "current_csi300_union_local_watchlist",
+        "watchlist_count": len(watchlist_symbols),
+        "added_watchlist_count": len(extra_symbols),
+        "constituent_count": len(merged),
+        "loaded_count": sum(not item.get("quote_error") for item in merged.values()),
+        "error_count": sum(bool(item.get("quote_error")) for item in merged.values()),
+    }
+    return list(merged.values()), metadata
+
+
+def _historical_selection_score(
+    candles: list[dict[str, Any]], volumes: list[float], end: int
+) -> float:
+    """Recreate the live selection score using only data observable at ``end``."""
+    closes = [_float(row.get("close")) for row in candles]
+    highs = [_float(row.get("high")) for row in candles]
+    close = closes[end]
+    ma20 = _mean(closes[end - 19 : end + 1])
+    ma60 = _mean(closes[end - 59 : end + 1])
+    momentum20 = _return(closes, end, 20)
+    rsi14 = _rsi(closes, end)
+    volume5 = _mean(volumes[end - 4 : end + 1])
+    volume20 = _mean(volumes[end - 19 : end + 1])
+    volume_ratio = volume5 / volume20 if volume20 else 1.0
+    mfi14 = _money_flow_index(candles, volumes, end)
+    mfi_regime = _mfi_regime(
+        closes,
+        highs,
+        volumes,
+        end,
+        momentum20=momentum20,
+        volume_ratio=volume_ratio,
+    )
+    mfi_filter = _mfi_filter(mfi14, mfi_regime)
+    score = 50.0
+    score += _clip(momentum20 * 150.0, -20.0, 20.0)
+    score += 10.0 if close > ma20 else -10.0
+    score += 8.0 if ma20 > ma60 else -8.0
+    score += 5.0 if 45.0 <= rsi14 <= 70.0 else (-6.0 if rsi14 >= 80.0 else 0.0)
+    score += _clip((volume_ratio - 1.0) * 5.0, -5.0, 5.0)
+    score += _float(mfi_filter.get("score_delta"))
+    return round(_clip(score, 0.0, 100.0), 1)
+
+
+def _backfill_historical_ml_samples(
+    state: dict[str, Any],
+    *,
+    calendar_days: int = 60,
+    refresh: bool = True,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    universe: str = "pool",
+) -> dict[str, Any]:
+    """Replay recent real market bars into the local ML evaluation database.
+
+    This is a point-in-time replay, not synthetic price generation. Features
+    are calculated from the prediction date and earlier, while labels come
+    from the next one/five trading bars. External LLM calls are deliberately
+    excluded so the bootstrap is deterministic and does not consume quota.
+    """
+    storage = _get_ai_service().storage
+    requested_start = datetime.fromisoformat(start_date).date() if start_date else None
+    requested_end = datetime.fromisoformat(end_date).date() if end_date else None
+    if requested_start and requested_end and requested_start > requested_end:
+        raise ValueError("历史回放开始日期不能晚于结束日期")
+    normalized_universe = str(universe or "pool").strip().lower()
+    if normalized_universe in {"csi300", "hs300", "沪深300"}:
+        normalized_universe = "csi300"
+        items, universe_metadata = _csi300_research_items(refresh=refresh)
+    elif normalized_universe in {
+        "csi300_plus_watchlist",
+        "csi300+watchlist",
+        "hs300_plus_watchlist",
+        "沪深300+观察池",
+        "沪深300加观察池",
+        "combined",
+    }:
+        normalized_universe = "csi300_plus_watchlist"
+        items, universe_metadata = _csi300_plus_watchlist_research_items(
+            state, refresh=refresh
+        )
+    elif normalized_universe == "pool":
+        items = _research_pool_items(state, refresh=refresh)
+        universe_metadata = {
+            "name": "当前观察池与持仓池",
+            "code": "local_pool",
+            "source": "local_review_center_state",
+            "constituent_count": len(items),
+            "membership_mode": "local_pool_snapshot",
+        }
+    else:
+        raise ValueError(f"不支持的历史训练股票池: {universe}")
+    if normalized_universe in {"csi300", "csi300_plus_watchlist"}:
+        loaded = sum(1 for item in items if item.get("_ai_series") and not item.get("quote_error"))
+        if loaded < 250:
+            raise RuntimeError(
+                f"历史训练股票池数据不足: loaded={loaded}, required>=250, "
+                f"universe={normalized_universe}, errors={universe_metadata.get('error_count', 0)}"
+            )
+    probability_replay = _llm_submodule("traditional").historical_probability_rows
+    feature_names = list(_llm_submodule("traditional").FEATURE_NAMES)
+    sample_count = 0
+    per_symbol: dict[str, int] = {}
+    errors: dict[str, str] = {}
+    earliest: str | None = None
+    latest: str | None = None
+    for item in items:
+        symbol = str(item.get("symbol") or "")
+        if item.get("quote_error"):
+            errors[symbol] = str(item.get("quote_error"))
+            continue
+        series = dict(item.get("_ai_series") or {})
+        candles = [
+            dict(row)
+            for row in list(series.get("candles") or [])
+            if _float(row.get("close")) > 0
+        ]
+        if len(candles) < 96:
+            errors[symbol] = "至少需要 96 根日 K 才能进行历史时点回放"
+            continue
+        volume_by_time = {
+            str(row.get("time")): _float(row.get("value"))
+            for row in list(series.get("volume") or [])
+        }
+        closes = [_float(row.get("close")) for row in candles]
+        volumes = [volume_by_time.get(str(row.get("time")), 0.0) for row in candles]
+        latest_market_date = datetime.fromisoformat(str(candles[-1]["time"])[:10]).date()
+        cutoff = requested_start or (
+            latest_market_date - timedelta(days=max(1, calendar_days) - 1)
+        )
+        range_end = requested_end or latest_market_date
+        targets = [
+            index
+            for index, candle in enumerate(candles)
+            if index >= 60
+            and index + 1 < len(candles)
+            and cutoff
+            <= datetime.fromisoformat(str(candle.get("time"))[:10]).date()
+            <= range_end
+        ]
+        replay_rows = probability_replay(closes, volumes, targets)
+        saved_for_symbol = 0
+        symbol_records: list[
+            tuple[dict[str, Any], list[dict[str, Any] | float]]
+        ] = []
+        for index in targets:
+            probabilities = replay_rows.get(index) or {}
+            next_day = dict(probabilities.get("next_trading_day") or {})
+            next_five = dict(probabilities.get("next_5_trading_days") or {})
+            if next_day.get("value") is None and next_five.get("value") is None:
+                continue
+            as_of_date = str(candles[index].get("time"))[:10]
+            selection_score = _historical_selection_score(candles, volumes, index)
+            swing_score = _llm_submodule("traditional").swing_composite_score(
+                selection_score,
+                next_day.get("value"),
+                next_five.get("value"),
+            )
+            momentum20 = _return(closes, index, 20)
+            volume5 = _mean(volumes[index - 4 : index + 1])
+            volume20 = _mean(volumes[index - 19 : index + 1])
+            volume_ratio = volume5 / volume20 if volume20 else 1.0
+            mfi14 = _money_flow_index(candles, volumes, index)
+            mfi_regime = _mfi_regime(
+                closes,
+                [_float(row.get("high")) for row in candles],
+                volumes,
+                index,
+                momentum20=momentum20,
+                volume_ratio=volume_ratio,
+            )
+            mfi_filter = _mfi_filter(mfi14, mfi_regime)
+            feature_values = _feature_row(closes, volumes, index) or []
+            analysis_id = f"historical-replay-{symbol}-{as_of_date}-v1"
+            final_action = (
+                "buy"
+                if swing_score >= SWING_BUY_SCORE_THRESHOLD
+                and _float(next_day.get("value"), 0.5) >= 0.52
+                and _float(next_five.get("value"), 0.5)
+                >= SWING_BUY_FIVE_DAY_PROBABILITY_THRESHOLD
+                and bool(mfi_filter.get("passed"))
+                else "observe"
+            )
+            result = {
+                "schema_version": "historical-market-replay-v3-swing-score",
+                "analysis_id": analysis_id,
+                "as_of": f"{as_of_date}T15:00:00+08:00",
+                "instrument": {
+                    "symbol": symbol,
+                    "name": item.get("name") or symbol,
+                    "sector_name": item.get("sector_name"),
+                    "current_price": closes[index],
+                },
+                "data_quality": {
+                    "score": 100,
+                    "status": "valid",
+                    "source": "real_daily_kline_point_in_time_replay",
+                    "synthetic_prices": False,
+                },
+                "traditional": {
+                    "strategy_id": "historical_market_replay_swing_v3",
+                    "selection_score": selection_score,
+                    "swing_score": swing_score,
+                    "close": closes[index],
+                    "mfi14": mfi14,
+                    "mfi_regime": mfi_regime,
+                    "mfi_filter": mfi_filter,
+                    "model_features": dict(zip(feature_names, feature_values)),
+                    "probabilities": {
+                        "next_trading_day": next_day,
+                        "next_5_trading_days": next_five,
+                    },
+                },
+                "fusion": {
+                    "assessment_status": "historical_replay",
+                    "final_action": final_action,
+                    "final_score": swing_score,
+                    "final_up_probabilities": {
+                        "next_trading_day": next_day,
+                        "next_5_trading_days": next_five,
+                    },
+                },
+                "audit": {
+                    "provider_model": "traditional_point_in_time_replay",
+                    "training_universe": normalized_universe,
+                    "universe_effective_date": universe_metadata.get("effective_date"),
+                    "universe_membership_mode": universe_metadata.get("membership_mode"),
+                    "replay_window_calendar_days": calendar_days,
+                    "replay_window_start": start_date,
+                    "replay_window_end": end_date,
+                    "feature_rule": "t_and_earlier_only",
+                    "label_rule": "strictly_future_1_and_5_trading_bars",
+                    "llm_called": False,
+                },
+            }
+            symbol_records.append(
+                (result, candles[index + 1 : index + 6])
+            )
+            sample_count += 1
+            saved_for_symbol += 1
+            earliest = min(earliest, as_of_date) if earliest else as_of_date
+            latest = max(latest, as_of_date) if latest else as_of_date
+        storage.save_labeled_batch(symbol_records)
+        per_symbol[symbol] = saved_for_symbol
+
+    performance = storage.performance_report()
+    training = storage.train_candidate_models(
+        universe=(
+            normalized_universe
+            if normalized_universe in {"csi300", "csi300_plus_watchlist"}
+            else None
+        ),
+        start_date=start_date,
+        end_date=end_date,
+    )
+    result = {
+        "status": "completed" if sample_count else "insufficient_data",
+        "source": "real_daily_kline_point_in_time_replay",
+        "synthetic_prices": False,
+        "window": {
+            "start": earliest,
+            "end": latest,
+            "requested_start": start_date,
+            "requested_end": end_date,
+            "calendar_days": calendar_days,
+        },
+        "sample_count": sample_count,
+        "universe": universe_metadata,
+        "per_symbol": per_symbol,
+        "errors": errors,
+        "performance": performance,
+        "training": training,
+        "leakage_control": {
+            "features": "prediction bar t and earlier",
+            "labels": "future 1/5 trading bars",
+            "llm_calls": 0,
+        },
+    }
+    artifact = persist_artifact(
+        Path.cwd() / "research_artifacts",
+        f"historical-train-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+        result,
+    )
+    result["artifact_path"] = artifact
+    return result
+
+
 def _run_research_action(
-    action: str, state: dict[str, Any], *, calendar_days: int = 60, refresh: bool = True
+    action: str,
+    state: dict[str, Any],
+    *,
+    calendar_days: int = 60,
+    refresh: bool = True,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    universe: str = "pool",
 ) -> dict[str, Any]:
     """Run a local, auditable research action against the pool ledger."""
     storage = _get_ai_service().storage
+    if action == "historical_train":
+        return _backfill_historical_ml_samples(
+            state,
+            calendar_days=calendar_days,
+            refresh=refresh,
+            start_date=start_date,
+            end_date=end_date,
+            universe=universe,
+        )
     if action in {"backtest", "labels", "metrics", "optimize", "full"}:
-        items = _research_pool_items(state, refresh=refresh)
+        if str(universe).lower() == "csi300":
+            items, universe_meta = _csi300_research_items(refresh=refresh)
+        elif str(universe).lower() == "csi300_plus_watchlist":
+            items, universe_meta = _csi300_plus_watchlist_research_items(state, refresh=refresh)
+        else:
+            items = _research_pool_items(state, refresh=refresh)
+            universe_meta = {"loaded_count": len(items), "error_count": 0}
         series_by_symbol = {
             str(item.get("symbol")): item.get("_ai_series")
             for item in items
             if item.get("symbol") and item.get("_ai_series")
         }
+        # Never create an apparently valid research/model artifact from a
+        # partially loaded broad universe.  Upstream quote endpoints can
+        # transiently close connections; proceeding with 7/327 symbols would
+        # produce misleading CPCV metrics and pollute the Challenger registry.
+        broad_universe = str(universe).lower() in {"csi300", "csi300_plus_watchlist"}
+        minimum_symbols = 250 if broad_universe else 1
+        if len(series_by_symbol) < minimum_symbols:
+            raise RuntimeError(
+                f"研究股票池数据不足: loaded={len(series_by_symbol)}, "
+                f"required>={minimum_symbols}, universe={universe}, "
+                f"errors={universe_meta.get('error_count', 0)}"
+            )
         dataset = build_dataset_bundle(series_by_symbol)
         dataset_meta = {
             "snapshot": dataset.get("snapshot"),
@@ -2276,22 +3245,122 @@ def _run_research_action(
         wfo: dict[str, Any] = {}
         base_params = {
             "initial_cash": REVIEW_INITIAL_EQUITY,
-            "max_positions": 5,
+            "max_positions": MAX_LOCAL_POSITIONS,
             "entry_weight": 0.10,
             "commission_rate": 0.0003,
             "stamp_tax_rate": 0.0005,
             "slippage_rate": 0.001,
         }
-        param_grid = {
+        standard_param_grid = {
             "fast_window": [3, 5, 8],
-            "slow_window": [15, 20, 30],
+            "slow_window": [30, 20, 15],
+            "momentum_window": [20, 10],
+            "volatility_cap": [0.045, 0.035, 0.025, 0.055],
+            "momentum_vol_weight": [0.5, 1.0, 1.5],
+            "trailing_atr_multiple": [2.5, 2.0, 1.5, 3.0],
+            "max_holding_bars": [15, 20, 10, 30],
+            "momentum_exit_threshold": [-0.01, 0.0, -0.02],
+            "max_entry_momentum": [0.25, 0.18, 0.35],
+        }
+        breakout_param_grid = {
+            **standard_param_grid,
+            "breakout_tolerance": [0.01, 0.0, 0.02, 0.03],
+            "pullback_tolerance": [0.02, 0.01, 0.03, 0.05],
+            "min_volume_ratio": [1.0, 0.9, 1.2, 1.5],
+            "breakout_entry_mode": [
+                "strict_breakout_or_pullback",
+                "breakout_only",
+                "pullback_only",
+            ],
+            "breakout_rank_bonus": [0.10, 0.25, 0.50],
+        }
+        # Momentum regime is deliberately constrained to the user's short-term
+        # trend/swing horizon.  The previous shared grid allowed slow 30-bar
+        # trend filters and long holding periods to win the in-sample score;
+        # on the 327-name universe those choices were unstable after regime
+        # changes.  Keep the search broad enough to discover robust settings,
+        # but exclude medium/long-horizon candidates that are outside scope.
+        momentum_param_grid = {
+            "fast_window": [3, 5, 8],
+            "slow_window": [15, 20],
             "momentum_window": [10, 20],
+            "volatility_cap": [0.035, 0.045, 0.055],
+            "momentum_vol_weight": [0.5, 1.0, 1.5],
+            "trailing_atr_multiple": [2.0, 2.5, 3.0],
+            "max_holding_bars": [10, 15, 20],
+            "momentum_exit_threshold": [-0.02, -0.01, 0.0],
+            "max_entry_momentum": [0.18, 0.25, 0.35],
+            "regime_window": [3, 5, 10],
+            "regime_momentum_threshold": [0.0, 0.01, 0.02],
+            "regime_acceleration_threshold": [-0.005, 0.0, 0.005],
+            "regime_exit_threshold": [-0.02, -0.01, 0.0],
+            "min_market_breadth": [0.30, 0.40, 0.50, 0.60],
+        }
+        standard_validation_grid = {
+            "fast_window": [5],
+            "slow_window": [20],
+            "momentum_window": [20],
+            "volatility_cap": [0.045],
+            "momentum_vol_weight": [1.0],
+            "trailing_atr_multiple": [2.5],
+            "max_holding_bars": [15],
+            "momentum_exit_threshold": [-0.01, 0.0],
+            "max_entry_momentum": [0.25],
+        }
+        breakout_validation_grid = {
+            "fast_window": [3],
+            "slow_window": [30],
+            "momentum_window": [20],
+            "volatility_cap": [0.045],
+            "momentum_vol_weight": [0.5],
+            "trailing_atr_multiple": [2.5],
+            "max_holding_bars": [15],
+            "momentum_exit_threshold": [-0.01],
+            "max_entry_momentum": [0.25],
+            "breakout_tolerance": [0.01, 0.03],
+            "pullback_tolerance": [0.02, 0.05],
+            "min_volume_ratio": [0.9],
+            "breakout_entry_mode": [
+                "strict_breakout_or_pullback",
+                "breakout_only",
+                "pullback_only",
+            ],
+            "breakout_rank_bonus": [0.10],
+        }
+        # CPCV validation uses a compact, style-consistent grid.  In
+        # particular, do not let a single training fold select slow_window=30
+        # and then label that unstable choice as the candidate's robustness.
+        momentum_validation_grid = {
+            "fast_window": [5, 8],
+            "slow_window": [20],
+            "momentum_window": [20],
+            "volatility_cap": [0.035, 0.045],
+            "momentum_vol_weight": [1.0],
+            "trailing_atr_multiple": [2.5],
+            "max_holding_bars": [15],
+            "momentum_exit_threshold": [-0.01],
+            "max_entry_momentum": [0.18],
+            "regime_window": [3, 5],
+            "regime_momentum_threshold": [0.0],
+            "regime_acceleration_threshold": [0.0],
+            "regime_exit_threshold": [-0.01],
+            "min_market_breadth": [0.30, 0.40, 0.50],
+        }
+        optimization_grids = {
+            "trend_swing": standard_param_grid,
+            "breakout_pullback": breakout_param_grid,
+            "momentum_regime": momentum_param_grid,
+        }
+        validation_grids = {
+            "trend_swing": standard_validation_grid,
+            "breakout_pullback": breakout_validation_grid,
+            "momentum_regime": momentum_validation_grid,
         }
         for strategy_name in ("trend_swing", "breakout_pullback", "momentum_regime"):
             strategies[strategy_name] = simulate_strategy(series_by_symbol, strategy=strategy_name, **base_params)
             wfo[strategy_name] = walk_forward_optimize(
                 series_by_symbol,
-                param_grid,
+                validation_grids[strategy_name],
                 strategy=strategy_name,
                 initial_cash=REVIEW_INITIAL_EQUITY,
                 train_bars=120,
@@ -2301,18 +3370,33 @@ def _run_research_action(
         optimization = {
             name: multi_objective_optimize(
                 series_by_symbol,
-                param_grid,
+                optimization_grids[name],
                 strategy=name,
                 initial_cash=REVIEW_INITIAL_EQUITY,
-                max_trials=60,
+                max_trials=90 if name == "momentum_regime" else 60,
                 storage_path=optuna_storage,
-                study_name=f"akquant-{SIMULATOR_VERSION}-{dataset['snapshot']['version']}-{name}",
+                study_name=(
+                    f"akquant-{SIMULATOR_VERSION}-{dataset['snapshot']['version']}-{name}"
+                    + ("-shortgrid2" if name == "momentum_regime" else "")
+                ),
             )
             for name in strategies
         }
+        optimized_strategy_runs = {
+            name: simulate_strategy(
+                series_by_symbol,
+                strategy=name,
+                **base_params,
+                **dict(((optimization[name].get("best") or {}).get("params") or {})),
+            )
+            for name in strategies
+        }
+        strategy_distinctness = _strategy_distinctness_audit(
+            optimized_strategy_runs
+        )
         purged = {
             name: purged_walk_forward_optimize(
-                series_by_symbol, param_grid, strategy=name,
+                series_by_symbol, validation_grids[name], strategy=name,
                 initial_cash=REVIEW_INITIAL_EQUITY, train_bars=120,
                 test_bars=30, purge_bars=5, embargo_bars=2,
             )
@@ -2333,7 +3417,13 @@ def _run_research_action(
             }
         best_name = max(strategies, key=lambda name: float((strategies[name].get("summary") or {}).get("sharpe_ratio") or -999.0)) if strategies else None
         if best_name:
-            baseline_model_id = f"champion-baseline-{dataset['snapshot']['version']}"
+            model_version = f"{dataset['snapshot']['version']}-{SIMULATOR_VERSION}"
+            # Each standalone optimization is a new Challenger round.  Keep
+            # the dataset/simulator lineage but add a run nonce so a prior
+            # superseded row is never silently reused or relabeled.
+            if action == "optimize":
+                model_version = f"{model_version}-tuned-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            baseline_model_id = f"champion-baseline-{model_version}"
             active_champion = storage.active_champion()
             if active_champion is None or (
                 active_champion.get("model_id") == baseline_model_id
@@ -2342,7 +3432,7 @@ def _run_research_action(
                 storage.register_model(
                     baseline_model_id,
                     model_name=best_name, role="champion", status="active_paper",
-                    version=dataset["snapshot"]["version"],
+                    version=model_version,
                     metrics={
                         **(strategies[best_name].get("summary") or {}),
                         "simulator_version": SIMULATOR_VERSION,
@@ -2364,14 +3454,15 @@ def _run_research_action(
                     },
                     "robustness": robustness[strategy_name],
                     "pbo": robustness[strategy_name].get("pbo"),
+                    "strategy_distinctness": strategy_distinctness[strategy_name],
                 }
                 storage.register_model(
-                    f"challenger-{strategy_name}-{dataset['snapshot']['version']}",
+                    f"challenger-{strategy_name}-{model_version}",
                     model_name=strategy_name, role="challenger", status="evaluated",
-                    version=dataset["snapshot"]["version"], metrics=candidate_metrics,
+                    version=model_version, metrics=candidate_metrics,
                 )
         if action == "optimize":
-            result = {"status": "completed", "dataset": dataset_meta, "optimization": optimization, "purged_walk_forward": purged, "robustness": robustness, "models": storage.list_models()}
+            result = {"status": "completed", "dataset": dataset_meta, "optimization": optimization, "purged_walk_forward": purged, "robustness": robustness, "strategy_distinctness": strategy_distinctness, "models": storage.list_models()}
             artifact = persist_artifact(Path.cwd() / "research_artifacts", f"optimize-{dataset['snapshot']['version']}", result)
             result["artifact_path"] = artifact
             return result
@@ -2393,7 +3484,9 @@ def _run_research_action(
             result["artifact_path"] = artifact
             return result
         performance = storage.performance_report()
-        training = storage.train_candidate_models()
+        training = storage.train_candidate_models(
+            universe=universe if universe in {"csi300", "csi300_plus_watchlist"} else None
+        )
         result = {
             "status": "completed",
             "dataset": dataset_meta,
@@ -2404,6 +3497,7 @@ def _run_research_action(
             "optimization": optimization,
             "purged_walk_forward": purged,
             "robustness": robustness,
+            "strategy_distinctness": strategy_distinctness,
             "models": storage.list_models(),
             "performance": performance,
             "training": training,
@@ -2412,11 +3506,712 @@ def _run_research_action(
         result["artifact_path"] = artifact
         return result
     if action == "train":
-        result = storage.train_candidate_models()
+        result = storage.train_candidate_models(
+            universe=universe if universe == "csi300" else None,
+            start_date=start_date,
+            end_date=end_date,
+        )
         artifact = persist_artifact(Path.cwd() / "research_artifacts", f"train-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}", result)
         result["artifact_path"] = artifact
         return result
     raise ValueError(f"不支持的研究动作: {action}")
+
+
+def _backtest_trade_metrics(backtest: dict[str, Any]) -> dict[str, Any]:
+    """Derive decision-useful trade diagnostics from one compact backtest."""
+    trades = list(backtest.get("trades") or [])
+    sells = [item for item in trades if str(item.get("action") or "").lower() == "sell"]
+    pnl = [_float(item.get("net_pnl")) for item in sells]
+    wins = [value for value in pnl if value > 0]
+    losses = [value for value in pnl if value < 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    consecutive = 0
+    max_consecutive_losses = 0
+    for value in pnl:
+        consecutive = consecutive + 1 if value < 0 else 0
+        max_consecutive_losses = max(max_consecutive_losses, consecutive)
+    return {
+        "completed_trade_count": len(sells),
+        "gross_profit": round(gross_profit, 2),
+        "gross_loss": round(gross_loss, 2),
+        "average_win": round(gross_profit / len(wins), 2) if wins else None,
+        "average_loss": round(sum(losses) / len(losses), 2) if losses else None,
+        "payoff_ratio": round((gross_profit / len(wins)) / abs(sum(losses) / len(losses)), 4)
+        if wins and losses and abs(sum(losses)) > 1e-12
+        else None,
+        "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 1e-12 else None,
+        "expectancy": round(sum(pnl) / len(pnl), 2) if pnl else None,
+        "max_consecutive_losses": max_consecutive_losses,
+    }
+
+
+def _strategy_distinctness_audit(
+    optimized_runs: dict[str, dict[str, Any]], *, maximum_overlap: float = 0.85
+) -> dict[str, dict[str, Any]]:
+    """Measure whether optimized strategies actually produce distinct trades."""
+
+    def events(result: dict[str, Any], action: str | None = None) -> set[tuple[str, str, str]]:
+        return {
+            (
+                str(item.get("time") or "")[:10],
+                str(item.get("symbol") or ""),
+                str(item.get("action") or "").lower(),
+            )
+            for item in list(result.get("trades") or [])
+            if (action is None or str(item.get("action") or "").lower() == action)
+        }
+
+    def overlap(left: set[tuple[str, str, str]], right: set[tuple[str, str, str]]) -> float:
+        union = left | right
+        if not union:
+            return 1.0
+        return len(left & right) / len(union)
+
+    all_events = {name: events(result) for name, result in optimized_runs.items()}
+    buy_events = {
+        name: events(result, "buy") for name, result in optimized_runs.items()
+    }
+    audit: dict[str, dict[str, Any]] = {}
+    for name in optimized_runs:
+        peers: dict[str, dict[str, float]] = {}
+        for peer in optimized_runs:
+            if peer == name:
+                continue
+            peers[peer] = {
+                "trade_event_overlap": round(
+                    overlap(all_events[name], all_events[peer]), 6
+                ),
+                "entry_event_overlap": round(
+                    overlap(buy_events[name], buy_events[peer]), 6
+                ),
+            }
+        max_trade_overlap = max(
+            (item["trade_event_overlap"] for item in peers.values()), default=0.0
+        )
+        max_entry_overlap = max(
+            (item["entry_event_overlap"] for item in peers.values()), default=0.0
+        )
+        audit[name] = {
+            "status": "valid",
+            "passed": max_trade_overlap <= maximum_overlap,
+            "maximum_allowed_overlap": maximum_overlap,
+            "max_peer_trade_overlap": max_trade_overlap,
+            "max_peer_entry_overlap": max_entry_overlap,
+            "trade_event_count": len(all_events[name]),
+            "entry_event_count": len(buy_events[name]),
+            "peers": peers,
+        }
+    return audit
+
+
+def _backtest_dashboard_payload(
+    state: dict[str, Any],
+    pool_payload: dict[str, Any] | None = None,
+    *,
+    storage: Any | None = None,
+    ai_status: dict[str, Any] | None = None,
+    force_current_backtest: bool = False,
+) -> dict[str, Any]:
+    """Build one bounded, source-backed payload for the analysis dashboard.
+
+    The report used to fetch the pool, baseline backtest, model registry and a
+    several-hundred-kilobyte research run independently.  This compact view
+    reconciles those sources on the server and exposes only the fields required
+    for analysis, which materially reduces page load and avoids metric drift.
+    """
+    service = _get_ai_service() if storage is None or ai_status is None else None
+    storage = storage or service.storage
+    ai_status = dict(ai_status or service.status())
+    pool_payload = dict(pool_payload or {})
+
+    runs = storage.list_research_runs(limit=20)
+    # Prefer a complete research artifact for report-wide fields.  An
+    # ``optimize`` run is intentionally compact and omits dataset quality and
+    # Walk-Forward summaries; selecting it first makes the dashboard display
+    # null quality and falsely mark every strategy as WFO-regressed.
+    latest_complete_run = next(
+        (
+            item
+            for item in runs
+            if item.get("status") == "completed"
+            and isinstance(item.get("result"), dict)
+            and item.get("action") == "full"
+            and isinstance((item.get("result") or {}).get("dataset"), dict)
+            and isinstance((item.get("result") or {}).get("walk_forward"), dict)
+        ),
+        None,
+    )
+    latest_run = latest_complete_run or next(
+        (
+            item
+            for item in runs
+            if item.get("status") == "completed"
+            and isinstance(item.get("result"), dict)
+            and item.get("action") in {"full", "optimize", "backtest", "daily_auto"}
+        ),
+        None,
+    )
+    latest_replay_run = next(
+        (
+            item
+            for item in runs
+            if item.get("status") == "completed"
+            and item.get("action") == "historical_train"
+            and isinstance(item.get("result"), dict)
+        ),
+        None,
+    )
+    latest_training_run = next(
+        (
+            item
+            for item in runs
+            if item.get("status") == "completed"
+            and item.get("action") in {"historical_train", "train"}
+            and isinstance(item.get("result"), dict)
+        ),
+        None,
+    )
+    # Dataset lineage and backtest metrics are not always produced by the
+    # same research action.  In particular, ``historical_train`` records the
+    # full CSI300+watchlist scope, while an older ``full`` artifact may carry
+    # a much smaller 40–42 symbol snapshot.  Keep the complete artifact for
+    # backtest/WFO fields, but prefer the newest explicit training scope for
+    # dataset cards and source metadata.
+    latest_dataset_run = next(
+        (
+            item
+            for item in runs
+            if item.get("status") == "completed"
+            and isinstance(item.get("result"), dict)
+            and isinstance((item.get("result") or {}).get("dataset"), dict)
+            and isinstance(((item.get("result") or {}).get("dataset") or {}).get("snapshot"), dict)
+        ),
+        None,
+    )
+    dataset_source_run = latest_dataset_run
+    dataset_scope = dict(
+        (((latest_training_run or {}).get("result") or {}).get("training") or {}).get("dataset_scope")
+        or {}
+    )
+    if latest_training_run and dataset_scope.get("symbol_count"):
+        def _run_time(item: dict[str, Any] | None) -> str:
+            return str((item or {}).get("started_at") or "")
+
+        dataset_quality = dict(
+            (((latest_dataset_run or {}).get("result") or {}).get("dataset") or {}).get("data_quality")
+            or {}
+        )
+        dataset_symbols = int(_float(dataset_quality.get("symbol_count"), 0.0))
+        scope_symbols = int(_float(dataset_scope.get("symbol_count"), 0.0))
+        # Never let a newer but narrower artifact (for example a local
+        # 40–42-symbol full run) hide the broad universe used for training.
+        if (
+            not latest_dataset_run
+            or dataset_symbols < scope_symbols
+            or _run_time(latest_training_run) >= _run_time(latest_dataset_run)
+        ):
+            dataset_source_run = latest_training_run
+    # The historical-training run is the authoritative lineage for the
+    # user's requested six-month CSI300+watchlist sample.  An optimize run
+    # may reuse the same 327 symbols but persist a wider market-history
+    # snapshot for simulator warm-up; using that snapshot's dates in the
+    # dashboard made it look as if training had ignored the six-month window.
+    dataset_lineage_run = (
+        latest_training_run if latest_training_run and dataset_scope.get("symbol_count") else dataset_source_run
+    )
+    raw_result = dict((latest_run or {}).get("result") or {})
+    if isinstance(raw_result.get("research"), dict):
+        raw_result = dict(raw_result["research"])
+
+    backtest = {} if force_current_backtest else dict(raw_result.get("backtest") or {})
+    # A historical research artifact can legitimately contain an
+    # ``insufficient_data`` placeholder from an earlier provider outage.  It
+    # is not a usable result and must not block rebuilding the current report
+    # from the live pool.  Previously this truthy placeholder was treated as
+    # a complete backtest, leaving the dashboard with empty recent returns
+    # and drawdown charts even though /api/backtest/review-baseline could
+    # produce a valid curve.
+    needs_current_backtest = (
+        force_current_backtest
+        or not backtest
+        or str(backtest.get("status") or "") == "insufficient_data"
+    )
+    if needs_current_backtest:
+        try:
+            cached = json.loads((Path.cwd() / BACKTEST_CACHE_FILE).read_text(encoding="utf-8"))
+            backtest = cached if isinstance(cached, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            backtest = {}
+    # A pool refresh invalidates the compact cache.  Rebuild the report from
+    # the current local ledger when no research artifact is available so the
+    # dashboard never presents an empty or stale backtest after a refresh.
+    if (
+        not backtest
+        or str(backtest.get("status") or "") == "insufficient_data"
+    ):
+        backtest = _review_baseline_backtest(state, calendar_days=60)
+        if force_current_backtest and backtest:
+            try:
+                Path.cwd().joinpath(BACKTEST_CACHE_FILE).write_text(
+                    json.dumps(backtest, ensure_ascii=False, default=str),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+    backtest_summary = dict(backtest.get("summary") or {})
+    symbol_names: dict[str, str] = {}
+    for source in (
+        list(state.get("positions") or [])
+        + list(state.get("watchlist") or [])
+        + list(state.get("manual_trades") or [])
+        + list(pool_payload.get("positions") or [])
+        + list(pool_payload.get("watchlist") or [])
+    ):
+        symbol = str(source.get("symbol") or "")
+        name = str(source.get("name") or "").strip()
+        if symbol and name and name != symbol:
+            symbol_names[symbol] = name
+    equity_curve = [
+        {
+            "time": str(item.get("time") or "")[:10],
+            "value": round(_float(item.get("value")), 2),
+            "drawdown_pct": round(_float(item.get("drawdown_pct", item.get("drawdown"))), 4),
+            "position_count": int(_float(item.get("position_count"))),
+        }
+        for item in list(backtest.get("equity_curve") or [])[-240:]
+    ]
+    backtest_trades = [
+        {
+            "time": str(item.get("time") or ""),
+            "symbol": str(item.get("symbol") or ""),
+            "name": str(
+                item.get("name")
+                or symbol_names.get(str(item.get("symbol") or ""))
+                or "历史标的"
+            ),
+            "action": str(item.get("action") or ""),
+            "price": round(_float(item.get("price")), 3),
+            "quantity": int(_float(item.get("quantity"))),
+            "net_pnl": round(_float(item.get("net_pnl")), 2),
+            "reason": str(item.get("reason") or ""),
+        }
+        for item in list(backtest.get("trades") or [])[-200:]
+    ]
+
+    try:
+        models = storage.list_models(include_snapshots=False)
+    except TypeError:  # backwards-compatible storage/test doubles
+        models = storage.list_models()
+    try:
+        active_champion = storage.active_champion(include_snapshot=False)
+    except TypeError:  # backwards-compatible storage/test doubles
+        active_champion = storage.active_champion()
+    # ``list_models`` is newest-first.  For the report, prefer the newest
+    # published component actually used by the live weighted-vote ensemble;
+    # falling back to a Challenger is only appropriate when a strategy has no
+    # published component yet.  Previously this always selected the newest
+    # *unpublished* Challenger, so a report displayed "发布门槛未通过" even
+    # though the strategy was already live in the ensemble.
+    published_by_name: dict[str, dict[str, Any]] = {}
+    challenger_by_name: dict[str, dict[str, Any]] = {}
+    for item in models:
+        name = str(item.get("model_name") or "")
+        if (
+            item.get("published_at")
+            and item.get("status") in {"active_paper", "superseded", "rolled_back"}
+            and name
+        ):
+            previous = published_by_name.get(name)
+            if previous is None or str(item.get("published_at")) > str(previous.get("published_at")):
+                published_by_name[name] = item
+        if item.get("role") == "challenger" and name:
+            challenger_by_name.setdefault(name, item)
+    strategy_results = dict(raw_result.get("strategies") or {})
+    optimization = dict(raw_result.get("optimization") or {})
+    cpcv_results = dict(raw_result.get("purged_walk_forward") or {})
+    robustness_results = dict(raw_result.get("robustness") or {})
+    walk_forward = dict(raw_result.get("walk_forward") or {})
+    preferred = ["trend_swing", "breakout_pullback", "momentum_regime"]
+    strategy_names = preferred + sorted(
+        (set(strategy_results) | set(optimization) | set(challenger_by_name)) - set(preferred)
+    )
+    strategy_rows: list[dict[str, Any]] = []
+    for name in strategy_names:
+        model = published_by_name.get(name) or challenger_by_name.get(name) or {}
+        live_published = bool(
+            model.get("published_at")
+            and model.get("status") in {"active_paper", "superseded", "rolled_back"}
+        )
+        metrics = dict(model.get("metrics") or {})
+        baseline = dict((strategy_results.get(name) or {}).get("summary") or {})
+        best = dict(metrics.get("best") or (optimization.get(name) or {}).get("best") or {})
+        cpcv = dict(
+            ((metrics.get("cpcv") or {}).get("summary") or {})
+            or ((cpcv_results.get(name) or {}).get("summary") or {})
+        )
+        robustness = dict(metrics.get("robustness") or robustness_results.get(name) or {})
+        distinctness = dict(metrics.get("strategy_distinctness") or {})
+        wfo = dict((walk_forward.get(name) or {}).get("summary") or {})
+        if live_published:
+            # A published component has already passed the release workflow.
+            # It is not a Challenger and must not be re-evaluated against the
+            # current Champion (which would produce a misleading failure).
+            gate = {
+                "passed": True,
+                "mode": "published_ensemble_component",
+                "message": "该组件已有审计发布记录，当前作为组合组件运行",
+                "checks": [],
+            }
+        else:
+            try:
+                gate = storage.evaluate_release_gate(str(model.get("model_id"))) if model else None
+            except ValueError:
+                gate = None
+        if not any((baseline, best, cpcv, robustness, wfo, model)):
+            continue
+        strategy_rows.append(
+            {
+                "strategy": name,
+                "baseline": baseline,
+                "optimized": {
+                    key: best.get(key)
+                    for key in (
+                        "sharpe_ratio",
+                        "total_return_pct",
+                        "max_drawdown_pct",
+                        "trade_count",
+                        "completed_trade_count",
+                        "win_rate",
+                    )
+                },
+                "best_params": dict(best.get("params") or {}),
+                "optimization": {
+                    "completed_trials": int(
+                        _float(metrics.get("completed_trial_count", (optimization.get(name) or {}).get("completed_trial_count")))
+                    ),
+                    "pruned_trials": int(
+                        _float(metrics.get("pruned_trial_count", (optimization.get(name) or {}).get("pruned_trial_count")))
+                    ),
+                },
+                "cpcv": cpcv,
+                "walk_forward": wfo,
+                "robustness": {
+                    "deflated_sharpe_ratio": robustness.get("deflated_sharpe_ratio"),
+                    "pbo": metrics.get("pbo", robustness.get("pbo")),
+                },
+                "model": {
+                    "model_id": model.get("model_id"),
+                    "status": model.get("status"),
+                    "version": model.get("version"),
+                    "live_published": live_published,
+                    "published_at": model.get("published_at"),
+                    "simulator_version": metrics.get("simulator_version"),
+                    "release_gate_passed": bool((gate or {}).get("passed")),
+                    "strategy_distinctness_passed": bool(
+                        distinctness.get("passed")
+                    ),
+                    "max_peer_trade_overlap": distinctness.get(
+                        "max_peer_trade_overlap"
+                    ),
+                    "max_peer_entry_overlap": distinctness.get(
+                        "max_peer_entry_overlap"
+                    ),
+                },
+            }
+        )
+    robust_candidates = [
+        row for row in strategy_rows if row["model"].get("release_gate_passed")
+    ] or strategy_rows
+    best_strategy = max(
+        robust_candidates,
+        key=lambda row: (
+            _float(row.get("cpcv", {}).get("mean_test_sharpe"), -999.0),
+            _float(row.get("optimized", {}).get("sharpe_ratio"), -999.0),
+        ),
+        default=None,
+    )
+
+    positions = list(pool_payload.get("positions") or state.get("positions") or [])
+    watchlist = list(pool_payload.get("watchlist") or state.get("watchlist") or [])
+    manual_trades = list(pool_payload.get("manual_trades") or state.get("manual_trades") or [])
+    items_by_symbol = {
+        str(item.get("symbol") or ""): item for item in positions + watchlist
+    }
+    signals: list[dict[str, Any]] = []
+    for signal in list(pool_payload.get("signals") or []):
+        symbol = str(signal.get("symbol") or "")
+        source = items_by_symbol.get(symbol) or {}
+        current = _float(signal.get("current_price"))
+        stop = _float(signal.get("stop_price"))
+        take = _float(signal.get("take_profit_price"))
+        risk = max(0.0, current - stop) if current and stop else 0.0
+        reward = max(0.0, take - current) if current and take else 0.0
+        probabilities = signal.get("probabilities") or {}
+        signals.append(
+            {
+                "symbol": symbol,
+                "name": str(signal.get("name") or source.get("name") or symbol),
+                "pool": str(signal.get("pool") or ""),
+                "sector": str(
+                    source.get("sector_name")
+                    or source.get("sector")
+                    or _local_sector_name(symbol, source.get("name"))
+                    or "未分类"
+                ),
+                "action": str(signal.get("action") or "观察"),
+                "selection_rank": int(_float(signal.get("selection_rank"))),
+                "selection_score": round(_float(signal.get("selection_score")), 2),
+                "swing_score": round(
+                    _float(signal.get("swing_score"), _float(signal.get("selection_score"))),
+                    2,
+                ),
+                "up_probability_1d": signal.get("up_probability"),
+                "up_probability_5d": (probabilities.get("next_5_trading_days") or {}).get("value"),
+                "validation_accuracy": signal.get("validation_accuracy"),
+                "assessment_status": signal.get("assessment_status"),
+                "current_price": current,
+                "suggested_price": signal.get("suggested_price"),
+                "momentum20": signal.get("momentum20"),
+                "mfi14": signal.get("mfi14"),
+                "mfi_regime": signal.get("mfi_regime"),
+                "mfi_filter_passed": bool((signal.get("mfi_filter") or {}).get("passed", True)),
+                "trend": signal.get("trend"),
+                "trend_direction": signal.get("trend_direction"),
+                "stop_price": signal.get("stop_price"),
+                "take_profit_price": signal.get("take_profit_price"),
+                "risk_reward_ratio": round(reward / risk, 3) if risk > 1e-12 else None,
+                "execution_ready": bool(signal.get("execution_signal")),
+                "reason": str(signal.get("reason") or signal.get("evaluation") or ""),
+                "active_model": signal.get("active_model"),
+            }
+        )
+    signals.sort(
+        key=lambda item: (
+            item.get("selection_rank") or 9999,
+            -_float(item.get("swing_score"), _float(item.get("selection_score"))),
+        )
+    )
+    action_counts: dict[str, int] = {}
+    sector_aggregate: dict[str, dict[str, Any]] = {}
+    for item in signals:
+        action_counts[item["action"]] = action_counts.get(item["action"], 0) + 1
+        sector = sector_aggregate.setdefault(
+            item["sector"], {"sector": item["sector"], "count": 0, "score_total": 0.0, "buy_candidates": 0}
+        )
+        sector["count"] += 1
+        sector["score_total"] += _float(
+            item.get("swing_score"), _float(item.get("selection_score"))
+        )
+        sector["buy_candidates"] += int(item.get("action") in {"买入", "等待买入"})
+    sector_rows = [
+        {
+            "sector": item["sector"],
+            "count": item["count"],
+            "buy_candidates": item["buy_candidates"],
+            "average_score": round(item["score_total"] / max(1, item["count"]), 2),
+        }
+        for item in sector_aggregate.values()
+    ]
+    sector_rows.sort(key=lambda item: (item["buy_candidates"], item["average_score"]), reverse=True)
+
+    cash = _float(pool_payload.get("available_cash"), _local_available_cash(state))
+    market_value = sum(
+        _float(item.get("current_price", item.get("entry_price"))) * _float(item.get("quantity"))
+        for item in positions
+    )
+    unrealized = sum(
+        (_float(item.get("current_price", item.get("entry_price"))) - _float(item.get("entry_price")))
+        * _float(item.get("quantity"))
+        for item in positions
+    )
+    compact_positions = [
+        {
+            "symbol": str(item.get("symbol") or ""),
+            "name": str(item.get("name") or item.get("symbol") or ""),
+            "sector": str(
+                item.get("sector_name")
+                or item.get("sector")
+                or _local_sector_name(str(item.get("symbol") or ""), item.get("name"))
+                or "未分类"
+            ),
+            "quantity": _float(item.get("quantity")),
+            "entry_price": _float(item.get("entry_price")),
+            "current_price": _float(item.get("current_price", item.get("entry_price"))),
+            "change_pct": item.get("change_pct"),
+            "market_value": round(_float(item.get("current_price", item.get("entry_price"))) * _float(item.get("quantity")), 2),
+            "unrealized_pnl": round(
+                (_float(item.get("current_price", item.get("entry_price"))) - _float(item.get("entry_price")))
+                * _float(item.get("quantity")),
+                2,
+            ),
+        }
+        for item in positions
+    ]
+
+    performance = storage.performance_report()
+    training = storage.training_dataset_summary()
+    dataset = dict(raw_result.get("dataset") or {})
+    # Keep dataset content aligned with the dataset source run.  The report
+    # intentionally uses a complete ``full`` artifact for backtest/WFO, but
+    # its embedded dataset may be stale or narrower than a later optimize or
+    # historical-training run.
+    if dataset_source_run and dataset_source_run is not latest_run:
+        source_result = dict((dataset_source_run or {}).get("result") or {})
+        source_dataset = source_result.get("dataset")
+        if isinstance(source_dataset, dict):
+            dataset = dict(source_dataset)
+    # Align the displayed dataset window and row count with the explicit
+    # historical-training scope while retaining the validated quality and
+    # feature/label metadata from the corresponding optimize artifact.
+    if latest_training_run and dataset_scope.get("symbol_count"):
+        scope_start = dataset_scope.get("requested_start") or ((latest_training_run or {}).get("result") or {}).get("window", {}).get("start")
+        scope_end = dataset_scope.get("requested_end") or ((latest_training_run or {}).get("result") or {}).get("window", {}).get("end")
+        dataset = {
+            "snapshot": {
+                "version": str((dataset.get("snapshot") or {}).get("version") or f"training-scope-{(latest_training_run or {}).get('run_id')}"),
+                "start": scope_start,
+                "end": scope_end,
+                "row_count": dataset_scope.get("row_count"),
+                "symbol_count": dataset_scope.get("symbol_count"),
+            },
+            "data_quality": {
+                "status": str((dataset.get("data_quality") or {}).get("status") or "valid"),
+                "symbol_count": dataset_scope.get("symbol_count"),
+                "row_count": dataset_scope.get("row_count"),
+                "total_errors": (dataset.get("data_quality") or {}).get("total_errors", 0),
+                "total_warnings": (dataset.get("data_quality") or {}).get("total_warnings", 0),
+                "future_leakage_check": (dataset.get("data_quality") or {}).get("future_leakage_check") or {"status": "not_run_in_historical_train"},
+                "scope_source": "historical_train.training.dataset_scope",
+            },
+            "training_scope": dict(dataset_scope),
+            "feature_version": dataset.get("feature_version"),
+            "label_version": dataset.get("label_version"),
+            "feature_names": list(dataset.get("feature_names") or []),
+            "label_names": list(dataset.get("label_names") or []),
+        }
+    else:
+        dataset_source_run = latest_dataset_run or latest_run
+    quality = dict(dataset.get("data_quality") or {})
+    snapshot = dict(dataset.get("snapshot") or {})
+    alerts: list[dict[str, str]] = []
+    if not ai_status.get("ready"):
+        alerts.append({"level": "warning", "title": "LLM 尚未就绪", "message": "当前报告可使用传统指标和本地机器学习信号，但外部 LLM 推理未参与最新决策。"})
+    if training.get("status") == "insufficient_data":
+        alerts.append({"level": "warning", "title": "机器学习样本仍不足", "message": "方向概率可作为辅助排序，暂不应单独作为发布或满仓依据。"})
+    if quality and quality.get("status") not in {"valid", "scope_only"}:
+        alerts.append({"level": "danger", "title": "研究数据质量异常", "message": "请先处理数据错误，再解释优化和交叉验证结果。"})
+    if best_strategy and _float(backtest_summary.get("total_return_pct")) < 0 < _float(best_strategy.get("optimized", {}).get("total_return_pct")):
+        alerts.append({"level": "info", "title": "长短样本结论分化", "message": "完整研究期优化结果为正，但最近两个月基准回测为负；当前环境适配性需要优先观察。"})
+    weak_wfo = [
+        row["strategy"]
+        for row in strategy_rows
+        if _float(row.get("optimized", {}).get("total_return_pct")) > 0
+        and _float(row.get("walk_forward", {}).get("total_return_pct")) <= 0
+    ]
+    if weak_wfo:
+        alerts.append({"level": "info", "title": "Walk-Forward 稳健性分化", "message": "部分策略的滚动窗口收益未同步改善：" + "、".join(weak_wfo) + "。"})
+
+    return {
+        "status": "ready" if latest_run and backtest else "partial",
+        "generated_at": _now_iso(),
+        "sources": {
+            "pool_as_of": pool_payload.get("as_of"),
+            "research_run_id": (latest_run or {}).get("run_id"),
+            "research_started_at": (latest_run or {}).get("started_at"),
+            "research_finished_at": (latest_run or {}).get("finished_at"),
+            "dataset_run_id": (dataset_lineage_run or {}).get("run_id"),
+            "dataset_source": quality.get("scope_source") or (dataset_lineage_run or {}).get("action"),
+            "dataset_version": snapshot.get("version"),
+            "dataset_start": snapshot.get("start"),
+            "dataset_end": snapshot.get("end"),
+            "simulator_version": (active_champion or {}).get("metrics", {}).get("simulator_version"),
+            "ensemble_version": MODEL_ENSEMBLE_VERSION,
+            "ensemble_component_count": len(_active_ensemble_runtime_policy(storage).get("policies") or {}),
+        },
+        "verdict": {
+            "best_robust_strategy": (best_strategy or {}).get("strategy"),
+            "release_gate_passed_count": sum(bool(row["model"].get("release_gate_passed")) for row in strategy_rows),
+            "strategy_count": len(strategy_rows),
+            "active_champion": {
+                "model_name": (active_champion or {}).get("model_name"),
+                "model_id": (active_champion or {}).get("model_id"),
+                "published_at": (active_champion or {}).get("published_at"),
+            },
+            "model_ensemble": _active_ensemble_runtime_policy(storage),
+            "alerts": alerts,
+        },
+        "backtest": {
+            "status": backtest.get("status"),
+            "reason": backtest.get("reason"),
+            "errors": dict(backtest.get("errors") or {}),
+            "symbols": list(backtest.get("symbols") or []),
+            "strategy": backtest.get("strategy"),
+            "window": backtest.get("window"),
+            "assumptions": backtest.get("assumptions"),
+            # The historical artifact may not have recorded component model
+            # IDs.  Expose the policy actually used by the current signal and
+            # paper-trading runtime so the report cannot imply that a pending
+            # Challenger was part of live backtesting.
+            "runtime_model_ensemble": _active_ensemble_runtime_policy(storage),
+            "summary": backtest_summary,
+            "trade_metrics": _backtest_trade_metrics(backtest),
+            "equity_curve": equity_curve,
+            "trades": backtest_trades,
+        },
+        "strategies": strategy_rows,
+        "selection": {
+            "signals": signals,
+            "action_counts": action_counts,
+            "executable_count": sum(bool(item.get("execution_ready")) for item in signals),
+            "average_score": round(statistics.mean([item["swing_score"] for item in signals]), 2) if signals else None,
+            "average_up_probability": round(statistics.mean([_float(item["up_probability_1d"]) for item in signals if item.get("up_probability_1d") is not None]), 4)
+            if any(item.get("up_probability_1d") is not None for item in signals)
+            else None,
+            "sector_strength": sector_rows,
+        },
+        "portfolio": {
+            "cash": round(cash, 2),
+            "market_value": round(market_value, 2),
+            "equity": round(cash + market_value, 2),
+            "exposure_pct": round(market_value / (cash + market_value) * 100.0, 2) if cash + market_value > 0 else 0.0,
+            "unrealized_pnl": round(unrealized, 2),
+            "positions": compact_positions,
+            "manual_trade_count": len(manual_trades),
+        },
+        "models": {
+            "ensemble": _active_ensemble_runtime_policy(storage),
+            "performance": performance,
+            "training": training,
+            "candidate_training": dict(
+                (
+                    ((latest_training_run or {}).get("result") or {}).get("training")
+                    if (latest_training_run or {}).get("action") == "historical_train"
+                    else (latest_training_run or {}).get("result")
+                )
+                or {}
+            ),
+            "historical_replay": {
+                key: ((latest_replay_run or {}).get("result") or {}).get(key)
+                for key in ("status", "source", "synthetic_prices", "window", "sample_count")
+            },
+            "llm": {
+                key: ai_status.get(key)
+                for key in ("enabled", "ready", "provider", "model", "prompt_version", "knowledge_version", "miaoxiang_ready", "missing")
+            },
+        },
+        "dataset": {
+            "snapshot": snapshot,
+            "quality": {
+                key: quality.get(key)
+                for key in ("status", "symbol_count", "row_count", "total_errors", "total_warnings", "future_leakage_check", "scope_source")
+            },
+            "feature_version": dataset.get("feature_version"),
+            "label_version": dataset.get("label_version"),
+            "feature_count": len(dataset.get("feature_names") or []),
+            "label_count": len(dataset.get("label_names") or []),
+        },
+    }
 
 
 def _sector_strength_value(signal: dict[str, Any]) -> float:
@@ -2430,8 +4225,484 @@ def _sector_strength_value(signal: dict[str, Any]) -> float:
     return 3.0 if any(token in text for token in ("强", "strong", "hot", "上升")) else (1.0 if any(token in text for token in ("弱", "weak", "冷", "下降")) else 2.0)
 
 
+MAX_LOCAL_POSITIONS = 4
+
+
+def _active_champion_runtime_policy(storage: Any | None = None) -> dict[str, Any] | None:
+    """Return only the published Champion fields required by live paper trading."""
+    storage = storage or _get_ai_service().storage
+    champion = storage.active_champion(include_snapshot=False)
+    if not champion or champion.get("role") != "champion":
+        return None
+    if champion.get("status") != "active_paper" or not champion.get("published_at"):
+        return None
+    metrics = dict(champion.get("metrics") or {})
+    best = dict(metrics.get("best") or {})
+    return {
+        "model_id": champion.get("model_id"),
+        "model_name": champion.get("model_name"),
+        "version": champion.get("version"),
+        "published_at": champion.get("published_at"),
+        "simulator_version": metrics.get("simulator_version"),
+        "params": dict(best.get("params") or {}),
+    }
+
+
+def _model_runtime_policy(model: dict[str, Any]) -> dict[str, Any]:
+    """Extract the immutable runtime fields shared by champion/candidates."""
+    metrics = dict(model.get("metrics") or {})
+    best = dict(metrics.get("best") or {})
+    return {
+        "model_id": model.get("model_id"),
+        "model_name": model.get("model_name"),
+        "version": model.get("version"),
+        "published_at": model.get("published_at"),
+        "simulator_version": metrics.get("simulator_version"),
+        "params": dict(best.get("params") or {}),
+        "status": model.get("status"),
+    }
+
+
+def _active_ensemble_runtime_policy(storage: Any | None = None) -> dict[str, Any]:
+    """Build the three-model policy used by the short-swing signal center.
+
+    Registry rows are newest-first.  A strategy may have only historical
+    published rows (for example after another Champion superseded it), so we
+    keep the newest usable row per strategy and expose its immutable params.
+    The live decision still requires the trend model plus at least one
+    confirmation model, with a weighted score for ranking.
+    """
+    storage = storage or _get_ai_service().storage
+    by_strategy: dict[str, dict[str, Any]] = {}
+    try:
+        rows = storage.list_models(include_snapshots=False)
+    except Exception:  # noqa: BLE001 - signal center remains usable without registry
+        rows = []
+    # An evaluated/release-requested Challenger is research-only.  It must
+    # never feed live signals or paper trading before an auditable publish
+    # event exists.  Published historical components remain eligible for the
+    # three-model ensemble even when their individual registry role is now
+    # archived/superseded.
+    usable_statuses = {"active_paper", "superseded", "rolled_back"}
+    for row in rows:
+        strategy = str(row.get("model_name") or "")
+        if strategy not in MODEL_ENSEMBLE_WEIGHTS or strategy in by_strategy:
+            continue
+        if row.get("status") not in usable_statuses or not row.get("published_at"):
+            continue
+        policy = _model_runtime_policy(row)
+        # A registry row without optimized params cannot provide a distinct
+        # model signal; skip it and let the next historical row fill the slot.
+        if policy["params"]:
+            by_strategy[strategy] = policy
+    return {
+        "mode": "weighted_vote",
+        "model_name": "short_swing_ensemble",
+        "version": MODEL_ENSEMBLE_VERSION,
+        "ensemble_version": MODEL_ENSEMBLE_VERSION,
+        "style": "short_term_trend_swing_ultra_short_allowed",
+        "hard_gate_strategy": "trend_swing",
+        "primary_confirmation_strategy": "breakout_pullback",
+        "secondary_confirmation_strategy": "momentum_regime",
+        "weights": dict(MODEL_ENSEMBLE_WEIGHTS),
+        "entry_threshold": MODEL_ENSEMBLE_ENTRY_THRESHOLD,
+        "trend_required": True,
+        "confirmation_required": 1,
+        "policies": by_strategy,
+    }
+
+
+def _active_model_signals(
+    signals: list[dict[str, Any]],
+    quotes: list[dict[str, Any]],
+    state: dict[str, Any],
+    model: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Gate rule signals with the currently published strategy parameters.
+
+    This is inference only: it reads the immutable published parameters and
+    today's OHLCV snapshot. It never trains, optimizes, publishes, calls an
+    LLM, or invokes an Agent.
+    """
+    params = dict(model.get("params") or {})
+    strategy = str(model.get("model_name") or "trend_swing")
+    fast_window = max(2, int(params.get("fast_window") or 5))
+    slow_window = max(fast_window + 1, int(params.get("slow_window") or 20))
+    momentum_window = max(1, int(params.get("momentum_window") or 20))
+    volatility_cap = _float(params.get("volatility_cap"), 0.045)
+    momentum_vol_weight = max(0.0, _float(params.get("momentum_vol_weight"), 1.0))
+    momentum_exit_threshold = _float(params.get("momentum_exit_threshold"), -0.01)
+    max_entry_momentum = _float(params.get("max_entry_momentum"), 0.35)
+    trailing_atr_multiple = max(0.0, _float(params.get("trailing_atr_multiple"), 2.5))
+    max_holding_bars = max(1, int(params.get("max_holding_bars") or 20))
+    breakout_tolerance = max(0.0, _float(params.get("breakout_tolerance"), 0.02))
+    pullback_tolerance = max(0.0, _float(params.get("pullback_tolerance"), 0.03))
+    min_volume_ratio = _float(params.get("min_volume_ratio"), 0.90)
+    breakout_entry_mode = str(
+        params.get("breakout_entry_mode") or "strict_breakout_or_pullback"
+    )
+    simulator_version = str(model.get("simulator_version") or "")
+    distinct_v7_rules = simulator_version.endswith("_v7") or any(
+        key in params
+        for key in (
+            "regime_window",
+            "regime_momentum_threshold",
+            "min_market_breadth",
+        )
+    )
+    regime_window = max(1, int(params.get("regime_window") or 5))
+    regime_momentum_threshold = _float(
+        params.get("regime_momentum_threshold"), 0.015
+    )
+    regime_acceleration_threshold = _float(
+        params.get("regime_acceleration_threshold"), 0.0
+    )
+    regime_exit_threshold = _float(params.get("regime_exit_threshold"), -0.01)
+    min_market_breadth = _clip(
+        _float(params.get("min_market_breadth"), 0.50), 0.0, 1.0
+    )
+    quote_by_symbol = {str(item.get("symbol") or ""): item for item in quotes}
+    position_by_symbol = {
+        str(item.get("symbol") or ""): item for item in state.get("positions") or []
+    }
+    market_eligible = 0
+    market_positive = 0
+    if distinct_v7_rules and strategy == "momentum_regime":
+        for quote in quotes:
+            market_candles = [
+                row
+                for row in list((quote.get("_ai_series") or {}).get("candles") or [])
+                if _float(row.get("close")) > 0
+            ]
+            if len(market_candles) < max(slow_window, momentum_window) + 1:
+                continue
+            market_closes = [_float(row.get("close")) for row in market_candles]
+            market_close = market_closes[-1]
+            market_slow = _mean(market_closes[-slow_window:])
+            market_momentum = (
+                market_close / market_closes[-momentum_window - 1] - 1.0
+            )
+            market_eligible += 1
+            market_positive += int(
+                market_close > market_slow and market_momentum > 0
+            )
+    market_breadth = (
+        market_positive / market_eligible if market_eligible else 0.0
+    )
+
+    for signal in signals:
+        symbol = str(signal.get("symbol") or "")
+        quote = quote_by_symbol.get(symbol) or {}
+        candles = [
+            row
+            for row in list((quote.get("_ai_series") or {}).get("candles") or [])
+            if _float(row.get("close")) > 0
+        ]
+        decision = {
+            "model_id": model.get("model_id"),
+            "model_name": strategy,
+            "version": model.get("version"),
+            "params": params,
+            "entry_allowed": False,
+            "exit_required": False,
+            "reason": "模型运行所需行情不足",
+        }
+        signal["active_model"] = decision
+        if len(candles) < max(slow_window, momentum_window, regime_window, 20) + 1:
+            if (signal.get("execution_signal") or {}).get("action") == "buy":
+                signal["execution_signal"] = None
+            continue
+
+        closes = [_float(row.get("close")) for row in candles]
+        close = closes[-1]
+        ma_fast = _mean(closes[-fast_window:])
+        ma_slow = _mean(closes[-slow_window:])
+        momentum = close / closes[-momentum_window - 1] - 1.0
+        momentum20 = close / closes[-21] - 1.0
+        regime_momentum = close / closes[-regime_window - 1] - 1.0
+        normalized_long_momentum = momentum * regime_window / momentum_window
+        momentum_acceleration = regime_momentum - normalized_long_momentum
+        recent_returns = [
+            closes[index] / closes[index - 1] - 1.0
+            for index in range(max(1, len(closes) - 20), len(closes))
+            if closes[index - 1] > 0
+        ]
+        volatility = (
+            statistics.stdev(recent_returns) if len(recent_returns) > 1 else 0.0
+        )
+        mfi_passed = bool((signal.get("mfi_filter") or {}).get("passed", True))
+        risk_scale = max(volatility, 0.005)
+        ranking_score = momentum / (risk_scale**momentum_vol_weight)
+        entry_allowed = close > ma_fast > ma_slow and momentum > 0 and mfi_passed
+        if strategy == "breakout_pullback":
+            recent_high = max(_float(row.get("high")) for row in candles[-20:])
+            volume_ratio = _float(signal.get("volume_ratio"), 1.0)
+            breakout_setup = (
+                close >= recent_high * (1.0 - breakout_tolerance)
+                and volume_ratio >= min_volume_ratio
+            )
+            pullback_setup = (
+                ma_fast > ma_slow
+                and close >= ma_fast
+                and close <= ma_fast * (1.0 + pullback_tolerance)
+            )
+            if distinct_v7_rules and breakout_entry_mode == "breakout_only":
+                pattern_setup = breakout_setup
+            elif distinct_v7_rules and breakout_entry_mode == "pullback_only":
+                pattern_setup = pullback_setup
+            elif distinct_v7_rules:
+                pattern_setup = breakout_setup or pullback_setup
+            elif breakout_entry_mode == "trend_with_breakout_overlay":
+                entry_allowed = close > ma_fast > ma_slow
+            else:
+                pattern_setup = breakout_setup or pullback_setup
+            if distinct_v7_rules or breakout_entry_mode != "trend_with_breakout_overlay":
+                entry_allowed = close > ma_slow and pattern_setup
+            entry_allowed = entry_allowed and momentum > 0 and mfi_passed
+        elif strategy == "momentum_regime" and distinct_v7_rules:
+            entry_allowed = (
+                close > ma_fast > ma_slow
+                and momentum > 0
+                and regime_momentum >= regime_momentum_threshold
+                and momentum_acceleration >= regime_acceleration_threshold
+                and market_breadth >= min_market_breadth
+                and mfi_passed
+            )
+            ranking_score += max(0.0, momentum_acceleration) / risk_scale
+        entry_allowed = (
+            entry_allowed
+            and volatility <= volatility_cap
+            and momentum20 <= max_entry_momentum
+        )
+
+        position = position_by_symbol.get(symbol)
+        exit_required = False
+        exit_reasons: list[str] = []
+        if position is not None:
+            market_date = str(signal.get("updated_at") or "")[:10]
+            peak_price = max(_float(position.get("model_peak_price"), close), close)
+            position["model_peak_price"] = round(peak_price, 4)
+            if market_date and position.get("model_last_evaluated_date") != market_date:
+                position["model_holding_bars"] = int(
+                    _float(position.get("model_holding_bars"))
+                ) + 1
+                position["model_last_evaluated_date"] = market_date
+            holding_bars = int(_float(position.get("model_holding_bars")))
+            atr14 = _float(signal.get("atr14"), close * 0.02)
+            trailing_stop = peak_price - trailing_atr_multiple * atr14
+            if strategy == "momentum_regime" and distinct_v7_rules:
+                if close < ma_fast:
+                    exit_reasons.append(f"收盘价跌破 MA{fast_window}")
+                if regime_momentum < regime_exit_threshold:
+                    exit_reasons.append("短周期动量状态转弱")
+                if market_breadth < min_market_breadth * 0.80:
+                    exit_reasons.append("市场动量宽度低于退出阈值")
+            else:
+                if close < ma_slow:
+                    exit_reasons.append(f"收盘价跌破 MA{slow_window}")
+                if momentum < momentum_exit_threshold:
+                    exit_reasons.append("动量跌破发布参数阈值")
+            if close < trailing_stop:
+                exit_reasons.append("跌破 ATR 移动止损")
+            if holding_bars >= max_holding_bars:
+                exit_reasons.append("达到最大持仓周期")
+            if volatility > volatility_cap * 1.35:
+                exit_reasons.append("波动率超过退出上限")
+            if strategy == "breakout_pullback":
+                prior_low = min(_float(row.get("low")) for row in candles[-21:-1])
+                if close < prior_low:
+                    exit_reasons.append("跌破前 20 日低点")
+            exit_required = bool(exit_reasons)
+
+        decision.update(
+            {
+                "entry_allowed": entry_allowed,
+                "exit_required": exit_required,
+                "ranking_score": round(ranking_score, 6),
+                "ma_fast": round(ma_fast, 4),
+                "ma_slow": round(ma_slow, 4),
+                "momentum": round(momentum, 6),
+                "regime_momentum": round(regime_momentum, 6),
+                "momentum_acceleration": round(momentum_acceleration, 6),
+                "market_breadth": round(market_breadth, 6),
+                "volatility20": round(volatility, 6),
+                "reason": "；".join(exit_reasons)
+                if exit_reasons
+                else ("发布模型入场条件通过" if entry_allowed else "发布模型入场条件未通过"),
+            }
+        )
+        execution = signal.get("execution_signal") or {}
+        if execution.get("action") == "buy" and not entry_allowed:
+            signal["execution_signal"] = None
+            if signal.get("action") in {"买入", "加仓"}:
+                signal["action"] = "等待买入"
+                signal["trigger"] = "选股规则已达标，但当前发布模型未通过入场门控"
+        if position is not None and exit_required:
+            quantity = math.floor(_float(position.get("quantity")) / 100) * 100
+            same_day_entry = str(position.get("model_entry_date") or "") == str(
+                signal.get("updated_at") or ""
+            )[:10]
+            if quantity > 0 and not same_day_entry:
+                signal["action"] = "模型卖出"
+                signal["trigger"] = decision["reason"]
+                signal["execution_signal"] = {
+                    "signal_id": (
+                        f"champion-{model.get('version')}-{symbol}-"
+                        f"{str(signal.get('updated_at') or 'latest')[:10]}-sell"
+                    ),
+                    "symbol": symbol,
+                    "action": "sell",
+                    "quantity": float(quantity),
+                    "price": round(close, 3),
+                    "strategy_id": str(model.get("model_id") or strategy),
+                }
+    return signals
+
+
+def _active_ensemble_signals(
+    signals: list[dict[str, Any]],
+    quotes: list[dict[str, Any]],
+    state: dict[str, Any],
+    ensemble: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Fuse the three strategy gates into one short-swing execution signal.
+
+    The trend model is a hard style gate.  Breakout/pullback and momentum
+    regime are timing confirmations; at least one must agree.  A weighted
+    vote is retained for ranking and auditability, while exits are fail-safe:
+    any published model's risk exit is sufficient to request a sell.
+    """
+    policies = dict(ensemble.get("policies") or {})
+    weights = dict(MODEL_ENSEMBLE_WEIGHTS)
+    threshold = _float(ensemble.get("entry_threshold"), MODEL_ENSEMBLE_ENTRY_THRESHOLD)
+    output: list[dict[str, Any]] = []
+    for original in signals:
+        decisions: dict[str, dict[str, Any]] = {}
+        for strategy in MODEL_ENSEMBLE_WEIGHTS:
+            policy = policies.get(strategy)
+            if not policy:
+                continue
+            # Each model owns its own holding-bar bookkeeping; do not let
+            # three inference passes increment the real ledger three times.
+            local_signal = copy.deepcopy(original)
+            local_quotes = copy.deepcopy(quotes)
+            local_state = copy.deepcopy(state)
+            result = _active_model_signals(
+                [local_signal], local_quotes, local_state, policy
+            )
+            decisions[strategy] = dict(
+                (result[0].get("active_model") if result else {}) or {}
+            )
+
+        trend = decisions.get("trend_swing") or {}
+        confirmations = [
+            name for name in ("breakout_pullback", "momentum_regime")
+            if bool((decisions.get(name) or {}).get("entry_allowed"))
+        ]
+        available_weights = sum(weights[name] for name in decisions)
+        vote_score = (
+            sum(
+                weights[name]
+                for name, decision in decisions.items()
+                if bool(decision.get("entry_allowed"))
+            )
+            / available_weights
+            if available_weights
+            else 0.0
+        )
+        trend_ok = bool(trend.get("entry_allowed"))
+        entry_allowed = trend_ok and len(confirmations) >= 1 and vote_score >= threshold
+        exit_models = [
+            name for name, decision in decisions.items()
+            if bool(decision.get("exit_required"))
+        ]
+        score_values = [
+            weights[name] * _float(decision.get("ranking_score"))
+            for name, decision in decisions.items()
+            if decision.get("ranking_score") is not None
+        ]
+        fused_score = sum(score_values) / available_weights if available_weights else 0.0
+        decision = {
+            "mode": "weighted_vote",
+            "ensemble_version": ensemble.get("ensemble_version", MODEL_ENSEMBLE_VERSION),
+            "weights": weights,
+            "entry_threshold": threshold,
+            "trend_required": True,
+            "confirmation_required": 1,
+            "entry_allowed": entry_allowed,
+            "exit_required": bool(exit_models),
+            "trend_vote": trend_ok,
+            "confirmation_votes": confirmations,
+            "vote_score": round(vote_score, 6),
+            "ranking_score": round(fused_score, 6),
+            "exit_models": exit_models,
+            "models": decisions,
+            "reason": (
+                "趋势模型通过且确认模型达到加权门槛"
+                if entry_allowed
+                else ("；".join(f"{name}触发退出" for name in exit_models)
+                      if exit_models else "趋势或确认模型未形成共振")
+            ),
+        }
+        merged = original
+        merged["active_model"] = decision
+        execution = merged.get("execution_signal") or {}
+        if execution.get("action") == "buy" and not entry_allowed:
+            merged["execution_signal"] = None
+            if merged.get("action") in {"买入", "加仓"}:
+                merged["action"] = "等待买入"
+                merged["trigger"] = "多模型投票未达到短线趋势波段入场门槛"
+        position = next(
+            (item for item in state.get("positions") or []
+             if str(item.get("symbol") or "") == str(merged.get("symbol") or "")),
+            None,
+        )
+        if position is not None and exit_models:
+            quantity = math.floor(_float(position.get("quantity")) / 100) * 100
+            market_date = str(merged.get("updated_at") or "latest")[:10]
+            same_day_entry = str(position.get("model_entry_date") or "") == market_date
+            if quantity > 0 and not same_day_entry:
+                price = _float(merged.get("current_price"))
+                merged["action"] = "模型卖出"
+                merged["trigger"] = decision["reason"]
+                merged["execution_signal"] = {
+                    "signal_id": f"ensemble-{ensemble.get('ensemble_version', MODEL_ENSEMBLE_VERSION)}-{merged.get('symbol')}-{market_date}-sell",
+                    "symbol": merged.get("symbol"),
+                    "action": "sell",
+                    "quantity": float(quantity),
+                    "price": round(price, 3),
+                    "strategy_id": MODEL_ENSEMBLE_VERSION,
+                }
+        output.append(merged)
+    return output
+
+
+def _signal_priority(signal: dict[str, Any]) -> tuple[float, float, float, float]:
+    """Return the portfolio execution priority used by both sides.
+
+    Buy signals consume scarce slots from strongest to weakest. Sell signals
+    release the weakest holdings first, using the exact inverse order.
+    """
+    probabilities = signal.get("probabilities") or {}
+    five_day_probability = (
+        probabilities.get("next_5_trading_days") or {}
+    ).get("value")
+    return (
+        _float(signal.get("swing_score"), _float(signal.get("selection_score"))),
+        _float(five_day_probability, -1.0),
+        _float(signal.get("up_probability"), -1.0),
+        _sector_strength_value(signal),
+    )
+
+
 def _execute_local_signals(
-    state: dict[str, Any], *, refresh: bool = True, automated: bool = False
+    state: dict[str, Any],
+    *,
+    refresh: bool = True,
+    automated: bool = False,
+    rendered: list[dict[str, Any]] | None = None,
+    active_model: dict[str, Any] | None = None,
+    required_market_date: str | None = None,
 ) -> dict[str, Any]:
     """Apply actionable signals to the local simulated ledger only.
 
@@ -2440,14 +4711,21 @@ def _execute_local_signals(
     a human-review flag.  The manual endpoint keeps its existing explicit
     confirmation flow and can therefore remain available for operator review.
     """
-    rendered = _research_pool_items(state, refresh=refresh)
+    rendered = rendered or _research_pool_items(state, refresh=refresh)
     signals = _pool_signals(state, rendered)
+    if automated and active_model:
+        if active_model.get("mode") == "weighted_vote":
+            signals = _active_ensemble_signals(signals, rendered, state, active_model)
+        else:
+            signals = _active_model_signals(signals, rendered, state, active_model)
     # Exit first; when cash is limited, buy/add orders are ranked by the
-    # requested priority: selection score, upward probability, sector strength.
+    # Short-swing priority: composite score, 5-day probability, next-day
+    # probability, then sector strength.
     exits = [signal for signal in signals if (signal.get("execution_signal") or {}).get("action") == "sell"]
     entries = [signal for signal in signals if (signal.get("execution_signal") or {}).get("action") == "buy"]
     others = [signal for signal in signals if signal not in exits and signal not in entries]
-    entries.sort(key=lambda signal: (_float(signal.get("selection_score")), _float(signal.get("up_probability"), -1.0), _sector_strength_value(signal)), reverse=True)
+    exits.sort(key=_signal_priority)
+    entries.sort(key=_signal_priority, reverse=True)
     signals = exits + entries + others
     existing_ids = {
         str(item.get("source_signal_id") or "")
@@ -2467,6 +4745,20 @@ def _execute_local_signals(
             continue
         symbol = str(execution.get("symbol") or signal.get("symbol") or "")
         if automated:
+            signal_market_date = str(signal.get("updated_at") or "")[:10]
+            if required_market_date and signal_market_date != required_market_date:
+                skipped.append(
+                    {
+                        "symbol": symbol,
+                        "name": signal.get("name", symbol),
+                        "reason_code": "stale_market_data",
+                        "reason": (
+                            f"自动交易已跳过：行情日期 {signal_market_date or '未知'} "
+                            f"不是 {required_market_date}"
+                        ),
+                    }
+                )
+                continue
             fusion = signal.get("fusion") or {}
             conflict_level = str(fusion.get("conflict_level") or "none").lower()
             human_review_required = bool(
@@ -2505,6 +4797,18 @@ def _execute_local_signals(
             skipped.append({"symbol": symbol, "reason_code": "position_insufficient", "reason": "卖出数量超过本地持仓"})
             continue
         if action == "buy":
+            if position is None and len(positions) >= MAX_LOCAL_POSITIONS:
+                skipped.append(
+                    {
+                        "symbol": symbol,
+                        "name": signal.get("name", symbol),
+                        "reason_code": "position_limit",
+                        "reason": f"组合持仓已达 {MAX_LOCAL_POSITIONS} 只上限，按排序跳过后续买入",
+                        "position_count": len(positions),
+                        "max_positions": MAX_LOCAL_POSITIONS,
+                    }
+                )
+                continue
             requested_quantity = quantity
             affordable_quantity = math.floor(
                 max(0.0, cash) / max(price * 1.0003, 1e-9) / 100
@@ -2547,10 +4851,17 @@ def _execute_local_signals(
             "quantity": quantity,
             "net_pnl": realized_pnl,
             "time": _now_iso(),
-            "source": "scheduled_local_research_signal"
+            "source": "scheduled_local_model_signal"
             if automated
-            else "local_research_signal",
+            else "local_signal",
+            "model_id": (active_model or {}).get("model_id") if automated else None,
+            "model_version": (active_model or {}).get("version") if automated else None,
         }
+        if action == "buy" and automated and position is not None:
+            position["model_entry_date"] = str(signal.get("updated_at") or "")[:10]
+            position["model_last_evaluated_date"] = position["model_entry_date"]
+            position["model_holding_bars"] = 0
+            position["model_peak_price"] = price
         trades.append(trade)
         cash += -price * quantity if action == "buy" else price * quantity
         existing_ids.add(signal_id)
@@ -2565,7 +4876,207 @@ def _execute_local_signals(
         "available_cash_before": round(cash_before, 2),
         "available_cash_after": round(cash, 2),
         "automated": automated,
+        "position_count": len(positions),
+        "max_positions": MAX_LOCAL_POSITIONS,
+        "active_model": active_model,
+        "research_performed": False,
+        "model_changed": False,
+        "llm_agent_called": False,
     }
+
+
+def _run_daily_trade_action(
+    state: dict[str, Any], *, refresh: bool = True
+) -> dict[str, Any]:
+    """Force-refresh today's pool, then execute paper trades without research."""
+    # ``refresh`` is retained for compatibility with older callers, but daily
+    # automation must never be allowed to opt into a cached pool snapshot.
+    refresh_requested = bool(refresh)
+    refresh_started_at = _now_iso()
+    rendered = _research_pool_items(state, refresh=True)
+    refresh_completed_at = _now_iso()
+    local_today = datetime.now().date().isoformat()
+
+    expected_symbols = list(
+        dict.fromkeys(
+            symbol
+            for item in list(state.get("positions") or [])
+            + list(state.get("watchlist") or [])
+            if (symbol := _code(str(item.get("symbol") or "")))
+        )
+    )
+    rendered_by_symbol = {
+        _code(str(item.get("symbol") or "")): item
+        for item in rendered
+        if _code(str(item.get("symbol") or ""))
+    }
+    refresh_errors: dict[str, str] = {}
+    refreshed_dates: dict[str, str] = {}
+    for symbol in expected_symbols:
+        item = rendered_by_symbol.get(symbol)
+        if item is None:
+            refresh_errors[symbol] = "刷新结果缺少该标的"
+            continue
+        if item.get("quote_error"):
+            refresh_errors[symbol] = str(item.get("quote_error"))
+            continue
+        market_date = str(
+            (item.get("analysis") or {}).get("as_of")
+            or item.get("updated_at")
+            or ""
+        )[:10]
+        if market_date:
+            refreshed_dates[symbol] = market_date
+        else:
+            refresh_errors[symbol] = "刷新结果缺少行情日期"
+
+    market_dates = sorted(
+        {
+            str((item.get("analysis") or {}).get("as_of") or item.get("updated_at") or "")[:10]
+            for item in rendered
+            if str((item.get("analysis") or {}).get("as_of") or item.get("updated_at") or "")[:10]
+        }
+    )
+    snapshot_end = market_dates[-1] if market_dates else ""
+    refresh_audit = {
+        "pool_refresh_performed": True,
+        "pool_refresh_forced": True,
+        "pool_refresh_requested": refresh_requested,
+        "pool_refresh_status": "completed",
+        "pool_refresh_symbol_count": len(expected_symbols),
+        "pool_refresh_success_count": len(expected_symbols) - len(refresh_errors),
+        "pool_refresh_errors": refresh_errors,
+        "pool_refresh_dates": refreshed_dates,
+        "pool_refresh_started_at": refresh_started_at,
+        "pool_refresh_completed_at": refresh_completed_at,
+        "pool_as_of": snapshot_end,
+    }
+    common_result = {
+        **refresh_audit,
+        "snapshot_end": snapshot_end,
+        "local_today": local_today,
+        "mode": "local_paper_trade_only",
+        "research_performed": False,
+        "model_changed": False,
+        "llm_agent_called": False,
+        "applied": [],
+        "skipped": [],
+    }
+    if refresh_errors:
+        return {
+            **common_result,
+            "status": "failed",
+            "reason": "票池行情刷新未完整，为避免使用旧数据已取消本次自动交易",
+            "pool_refresh_status": "failed",
+        }
+    stale_symbols = {
+        symbol: market_date
+        for symbol, market_date in refreshed_dates.items()
+        if market_date != local_today
+    }
+    if snapshot_end != local_today or stale_symbols:
+        return {
+            **common_result,
+            "status": "skipped",
+            "reason": "最新行情日期不是今天，疑似周末/节假日或行情尚未更新",
+            "pool_refresh_status": "stale",
+            "pool_refresh_stale_symbols": stale_symbols,
+        }
+    model = _active_ensemble_runtime_policy()
+    if model is None:
+        return {
+            **common_result,
+            "status": "skipped",
+            "reason": "没有已发布且处于 active_paper 状态的 Champion，未执行自动交易",
+        }
+    execution = _execute_local_signals(
+        state,
+        refresh=False,
+        automated=True,
+        rendered=rendered,
+        active_model=model,
+        required_market_date=local_today,
+    )
+    return {
+        **common_result,
+        **execution,
+    }
+
+
+def _scheduled_trade_already_recorded(storage: Any, schedule_date: str) -> bool:
+    return any(
+        item.get("action") == "daily_trade"
+        and str((item.get("params") or {}).get("schedule_date") or "")
+        == schedule_date
+        for item in storage.list_automation_runs(limit=100)
+    )
+
+
+def _execute_scheduled_daily_trade(root: Path, schedule_date: str) -> dict[str, Any]:
+    """Execute one server-native 19:00 run without Codex/Agent scheduling."""
+    storage = _get_ai_service().storage
+    with _DAILY_TRADE_SCHEDULER_LOCK:
+        if _scheduled_trade_already_recorded(storage, schedule_date):
+            return {"status": "deduplicated", "schedule_date": schedule_date}
+        run_id = storage.create_automation_run(
+            "daily_trade",
+            {
+                "refresh": True,
+                "refresh_forced": True,
+                "schedule_date": schedule_date,
+                "trigger": "review_center_server_native_scheduler",
+                "mode": "local_paper_trade_only",
+                "account_source": "local_review_center_state",
+                "research_performed": False,
+                "llm_agent_called": False,
+            },
+        )
+    state_path = root / STATE_FILE
+    try:
+        state = (
+            json.loads(state_path.read_text(encoding="utf-8"))
+            if state_path.exists()
+            else {
+                "positions": [],
+                "watchlist": [],
+                "manual_trades": [],
+                "initialized": True,
+            }
+        )
+        result = _run_daily_trade_action(state, refresh=True)
+        if result.get("status") == "failed":
+            storage.finish_automation_run(
+                run_id,
+                status="failed",
+                result=result,
+                error=str(result.get("reason") or "票池刷新失败"),
+            )
+            return {"status": "failed", "run_id": run_id, "result": result}
+        if result.get("status") == "completed":
+            state["initialized"] = True
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (root / POOL_CACHE_FILE).unlink(missing_ok=True)
+            (root / BACKTEST_CACHE_FILE).unlink(missing_ok=True)
+        storage.finish_automation_run(run_id, status="completed", result=result)
+        return {"status": "completed", "run_id": run_id, "result": result}
+    except Exception as exc:  # noqa: BLE001 - scheduler must leave an audit row
+        storage.finish_automation_run(
+            run_id,
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return {"status": "failed", "run_id": run_id, "error": str(exc)}
+
+
+def _daily_trade_scheduler_loop(root: Path) -> None:
+    """Run once each weekday during the local 19:00 hour."""
+    while True:
+        now = datetime.now()
+        if now.weekday() < 5 and now.hour == 19:
+            _execute_scheduled_daily_trade(root, now.date().isoformat())
+        time.sleep(30)
 
 
 class ReviewCenterHandler(SimpleHTTPRequestHandler):
@@ -2672,7 +5183,30 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                     continue
                 if key == "name" and value == quote.get("symbol") and item.get("name"):
                     continue
+                # Quote providers may omit industry metadata.  Never erase a
+                # previously cached classification with an empty response.
+                if key in {"sector_name", "region_name", "concept_names"} and not value:
+                    continue
                 merged[key] = value
+            if not merged.get("sector_name"):
+                local_sector = _local_sector_name(
+                    str(merged.get("symbol") or ""), merged.get("name")
+                )
+                if local_sector:
+                    merged["sector_name"] = local_sector
+                    merged["sector_context"] = {
+                        "status": "fallback",
+                        "name": local_sector,
+                        "strength": "未知",
+                        "source": "local_symbol_sector_map",
+                    }
+            if not merged.get("sector_name"):
+                sector_context = _fetch_miaoxiang_sector(
+                    str(merged.get("symbol") or ""), merged.get("sector_name")
+                )
+                if sector_context.get("name"):
+                    merged["sector_name"] = sector_context["name"]
+                    merged["sector_context"] = sector_context
             if not item.get("self_price"):
                 merged["self_price"] = quote.get("current_price", 0.0)
             merged["_ai_series"] = series
@@ -2701,7 +5235,10 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                 # parallel keeps the review page responsive as the pools grow.
                 sources = state["watchlist"] + state["positions"]
                 with ThreadPoolExecutor(
-                    max_workers=max(1, min(8, len(sources)))
+                    # 妙想 MCP is the first-priority source and has a
+                    # per-request handshake cost; bounded parallelism keeps
+                    # first-load latency reasonable without unbounded bursts.
+                    max_workers=max(1, min(16, len(sources)))
                 ) as executor:
                     rendered = list(
                         executor.map(
@@ -2723,8 +5260,15 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                     ):
                         source["name"] = rendered["name"]
                         migrated = True
+                    if rendered.get("sector_name") and source.get("sector_name") != rendered["sector_name"]:
+                        source["sector_name"] = rendered["sector_name"]
+                        migrated = True
                     if not source.get("self_price") and not rendered.get("quote_error"):
                         source["self_price"] = rendered.get("self_price")
+                        migrated = True
+                for source, rendered in zip(state["positions"], positions):
+                    if rendered.get("sector_name") and source.get("sector_name") != rendered["sector_name"]:
+                        source["sector_name"] = rendered["sector_name"]
                         migrated = True
                 if migrated:
                     self._write_state(state)
@@ -2736,6 +5280,12 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                     {key: value for key, value in item.items() if key != "_ai_series"}
                     for item in positions
                 ]
+                signals = _pool_signals(state, watchlist + positions)
+                active_model = _active_ensemble_runtime_policy()
+                if active_model:
+                    signals = _active_ensemble_signals(
+                        signals, watchlist + positions, state, active_model
+                    )
                 response_payload = {
                         "watchlist": public_watchlist,
                         "positions": public_positions,
@@ -2745,7 +5295,8 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                             key=lambda trade: str(trade.get("time") or ""),
                             reverse=True,
                         ),
-                        "signals": _pool_signals(state, watchlist + positions),
+                        "signals": signals,
+                        "active_model": active_model,
                         "initialized": state["initialized"],
                         "initial_equity": REVIEW_INITIAL_EQUITY,
                         "available_cash": round(_local_available_cash(state), 2),
@@ -2753,8 +5304,26 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                         "_cache_version": POOL_CACHE_VERSION,
                         "cache": {"status": "refreshed" if refresh else "miss"},
                     }
+                if refresh:
+                    # Quotes and derived signals changed; force the next
+                    # dashboard read to rebuild its stateful backtest.
+                    self.backtest_cache_path.unlink(missing_ok=True)
                 self._write_json_cache(self.pool_cache_path, response_payload)
                 self._json(response_payload)
+                return
+            if parsed.path == "/api/reports/backtest-dashboard":
+                pool_payload = self._read_json_cache(self.pool_cache_path) or {}
+                self._json(
+                    _backtest_dashboard_payload(
+                        self._read_state(),
+                        pool_payload=pool_payload,
+                        force_current_backtest=(
+                            not pool_payload
+                            or
+                            pool_payload.get("cache", {}).get("status") == "refreshed"
+                        ),
+                    )
+                )
                 return
             if parsed.path == "/api/backtest/review-baseline":
                 days = int(query.get("days", ["60"])[0])
@@ -2784,29 +5353,73 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/research/status":
                 storage = _get_ai_service().storage
-                self._json(
-                    {
-                        "pool_source": "local_review_center_state",
-                        "positions": len(self._read_state().get("positions") or []),
-                        "watchlist": len(self._read_state().get("watchlist") or []),
-                        "latest_runs": storage.list_research_runs(limit=10),
-                        "performance": storage.performance_report(),
-                        "training": storage.training_dataset_summary(),
-                    }
-                )
+                state_snapshot = self._read_state()
+                response = {
+                    "pool_source": "local_review_center_state",
+                    "positions": len(state_snapshot.get("positions") or []),
+                    "watchlist": len(state_snapshot.get("watchlist") or []),
+                    "latest_runs": storage.list_research_runs(limit=10, include_results=False),
+                }
+                # The signal-center status strip only needs the latest run.
+                # Computing the full performance/training reports requires
+                # scanning and decoding every historical observation and made
+                # each page load take several seconds.  Keep that detail
+                # available for explicit diagnostics without penalising the
+                # normal UI path.
+                if query.get("detail", [""])[0].lower() in {"1", "true", "yes"}:
+                    response["performance"] = storage.performance_report()
+                    response["training"] = storage.training_dataset_summary()
+                self._json(response)
                 return
             if parsed.path == "/api/research/runs":
                 limit = int(query.get("limit", ["20"])[0])
-                self._json({"items": _get_ai_service().storage.list_research_runs(limit)})
+                # Keep the default response bounded.  A completed optimize
+                # run can contain a very large artifact (the historical
+                # payload previously made this endpoint ~150 MB), while the
+                # status poller only needs run metadata.  Full results remain
+                # available through an explicit ``detail=1``/``summary=0``.
+                summary_value = query.get("summary", [""])[0].lower()
+                summary = not (
+                    query.get("detail", [""])[0].lower() in {"1", "true", "yes"}
+                    or summary_value in {"0", "false", "no"}
+                )
+                self._json(
+                    {
+                        "items": _get_ai_service().storage.list_research_runs(
+                            limit, include_results=not summary
+                        )
+                    }
+                )
+                return
+            if parsed.path == "/api/automation/status":
+                storage = _get_ai_service().storage
+                self._json(
+                    {
+                        "mode": "local_paper_trade_only",
+                        "schedule": "weekdays_19:00_Asia/Shanghai",
+                        "active_model": _active_ensemble_runtime_policy(storage),
+                        "active_champion": _active_champion_runtime_policy(storage),
+                        "latest_runs": storage.list_automation_runs(limit=10),
+                        "research_performed": False,
+                        "llm_agent_called": False,
+                    }
+                )
+                return
+            if parsed.path == "/api/automation/runs":
+                limit = int(query.get("limit", ["20"])[0])
+                self._json(
+                    {"items": _get_ai_service().storage.list_automation_runs(limit)}
+                )
                 return
             if parsed.path == "/api/models":
                 storage = _get_ai_service().storage
                 self._json(
                     {
-                        "items": storage.list_models(),
-                        "active_champion": storage.active_champion(),
+                        "items": storage.list_models(include_snapshots=False),
+                        "active_champion": storage.active_champion(include_snapshot=False),
+                        "ensemble": _active_ensemble_runtime_policy(storage),
                         "release_requests": storage.list_release_requests(),
-                        "releases": storage.list_model_releases(),
+                        "releases": storage.list_model_releases(include_snapshots=False),
                     }
                 )
                 return
@@ -2901,6 +5514,12 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                 except ValueError as exc:
                     self._json({"error": str(exc)}, status=400)
                     return
+                # A publish changes the immutable model parameters consumed by
+                # signal-center inference and by the stateful backtest.  Drop
+                # both caches immediately so the next read cannot expose a
+                # pre-publish ensemble snapshot.
+                self.pool_cache_path.unlink(missing_ok=True)
+                self.backtest_cache_path.unlink(missing_ok=True)
                 self._json(result)
                 return
             if self.path == "/api/models/release/reject":
@@ -2925,7 +5544,119 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                 except ValueError as exc:
                     self._json({"error": str(exc)}, status=400)
                     return
+                # Rollback also changes the live ensemble lineage; invalidate
+                # inference and report caches for the same reason as publish.
+                self.pool_cache_path.unlink(missing_ok=True)
+                self.backtest_cache_path.unlink(missing_ok=True)
                 self._json(result)
+                return
+            if self.path == "/api/automation/trade":
+                storage = _get_ai_service().storage
+                running = next(
+                    (
+                        item
+                        for item in storage.list_automation_runs(limit=10)
+                        if item.get("action") == "daily_trade"
+                        and item.get("status") == "running"
+                    ),
+                    None,
+                )
+                if running:
+                    self._json(
+                        {
+                            "run_id": running.get("run_id"),
+                            "action": "daily_trade",
+                            "status": "running",
+                            "background": True,
+                            "deduplicated": True,
+                        },
+                        status=202,
+                    )
+                    return
+                run_id = storage.create_automation_run(
+                    "daily_trade",
+                    {
+                        "refresh": True,
+                        "refresh_forced": True,
+                        "mode": "local_paper_trade_only",
+                        "account_source": "local_review_center_state",
+                        "symbols": [
+                            str(item.get("symbol"))
+                            for item in (state.get("positions") or [])
+                            + (state.get("watchlist") or [])
+                            if item.get("symbol")
+                        ],
+                        "research_performed": False,
+                        "llm_agent_called": False,
+                    },
+                )
+
+                def execute_trade_job() -> dict[str, Any]:
+                    try:
+                        result = _run_daily_trade_action(state, refresh=True)
+                        if result.get("status") == "failed":
+                            storage.finish_automation_run(
+                                run_id,
+                                status="failed",
+                                result=result,
+                                error=str(result.get("reason") or "票池刷新失败"),
+                            )
+                            return {
+                                "status": "failed",
+                                "error": str(result.get("reason") or "票池刷新失败"),
+                                "result": result,
+                            }
+                        if result.get("status") == "completed":
+                            state["initialized"] = True
+                            self._write_state(state)
+                        storage.finish_automation_run(
+                            run_id, status="completed", result=result
+                        )
+                        return {"status": "completed", "result": result}
+                    except Exception as exc:  # noqa: BLE001 - auditable failure
+                        storage.finish_automation_run(
+                            run_id,
+                            status="failed",
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                        return {"status": "failed", "error": str(exc)}
+
+                if bool(payload.get("background", False)):
+                    Thread(
+                        target=execute_trade_job,
+                        name=f"automation-{run_id}",
+                        daemon=True,
+                    ).start()
+                    self._json(
+                        {
+                            "run_id": run_id,
+                            "action": "daily_trade",
+                            "status": "running",
+                            "started_at": _now_iso(),
+                            "background": True,
+                        },
+                        status=202,
+                    )
+                    return
+
+                outcome = execute_trade_job()
+                if outcome["status"] == "failed":
+                    self._json(
+                        {
+                            "run_id": run_id,
+                            "action": "daily_trade",
+                            "error": outcome["error"],
+                        },
+                        status=502,
+                    )
+                else:
+                    self._json(
+                        {
+                            "run_id": run_id,
+                            "action": "daily_trade",
+                            "result": outcome["result"],
+                        }
+                    )
                 return
             if self.path == "/api/research/execute":
                 if not bool(payload.get("confirm")):
@@ -2963,27 +5694,89 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                     "train": "train",
                     "training": "train",
                     "训练": "train",
+                    "historical_train": "historical_train",
+                    "historical": "historical_train",
+                    "历史回放训练": "historical_train",
                     "optimize": "optimize",
                     "optimization": "optimize",
                     "优化": "optimize",
                     "full": "full",
                     "全部": "full",
-                    "daily_auto": "daily_auto",
-                    "auto": "daily_auto",
-                    "每日自动交易": "daily_auto",
                 }
                 action = aliases.get(action, action)
-                if action not in {"backtest", "labels", "metrics", "train", "optimize", "full", "daily_auto"}:
+                if action not in {"backtest", "labels", "metrics", "train", "historical_train", "optimize", "full"}:
                     self._json({"error": f"不支持的研究动作: {action}"}, status=400)
                     return
                 days = max(30, min(int(payload.get("calendar_days") or 60), 180))
+                start_date = str(payload.get("start_date") or "").strip() or None
+                end_date = str(payload.get("end_date") or "").strip() or None
+                universe = str(payload.get("universe") or "pool").strip().lower()
+                if universe in {"hs300", "沪深300"}:
+                    universe = "csi300"
+                if universe in {
+                    "csi300+watchlist",
+                    "hs300_plus_watchlist",
+                    "沪深300+观察池",
+                    "沪深300加观察池",
+                    "combined",
+                }:
+                    universe = "csi300_plus_watchlist"
+                if universe not in {"pool", "csi300", "csi300_plus_watchlist"}:
+                    self._json({"error": f"不支持的训练股票池: {universe}"}, status=400)
+                    return
+                try:
+                    parsed_start = datetime.fromisoformat(start_date).date() if start_date else None
+                    parsed_end = datetime.fromisoformat(end_date).date() if end_date else None
+                except ValueError:
+                    self._json({"error": "start_date/end_date 必须使用 YYYY-MM-DD 格式"}, status=400)
+                    return
+                if parsed_start and parsed_end and parsed_start > parsed_end:
+                    self._json({"error": "start_date 不能晚于 end_date"}, status=400)
+                    return
                 storage = _get_ai_service().storage
+                # Research actions are CPU/network intensive and share the
+                # same local artifacts. Do not start a second job while one is
+                # already running; callers can poll the existing run instead.
+                # Listing also reconciles abandoned rows after a crash.
+                running = next(
+                    (
+                        item
+                        for item in storage.list_research_runs(
+                            limit=20, include_results=False
+                        )
+                        if item.get("status") == "running"
+                    ),
+                    None,
+                )
+                if running:
+                    self._json(
+                        {
+                            "run_id": running.get("run_id"),
+                            "action": running.get("action"),
+                            "status": "running",
+                            "background": True,
+                            "deduplicated": True,
+                        },
+                        status=202,
+                    )
+                    return
                 run_id = storage.create_research_run(
                     action,
                     {
                         "calendar_days": days,
+                        "start_date": start_date,
+                        "end_date": end_date,
                         "refresh": bool(payload.get("refresh", True)),
-                        "pool_source": "local_review_center_state",
+                        "pool_source": (
+                            "csi300_plus_local_watchlist"
+                            if universe == "csi300_plus_watchlist"
+                            else (
+                                "csi300_current_constituents"
+                                if universe == "csi300"
+                                else "local_review_center_state"
+                            )
+                        ),
+                        "universe": universe,
                         "symbols": [
                             str(item.get("symbol"))
                             for item in (state.get("positions") or [])
@@ -2996,45 +5789,15 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
 
                 def execute_research_job() -> dict[str, Any]:
                     try:
-                        research_action = "full" if action == "daily_auto" else action
                         result = _run_research_action(
-                            research_action,
+                            action,
                             state,
                             calendar_days=days,
                             refresh=refresh_research,
+                            start_date=start_date,
+                            end_date=end_date,
+                            universe=universe,
                         )
-                        if action == "daily_auto":
-                            snapshot_end = str(
-                                (result.get("dataset") or {})
-                                .get("snapshot", {})
-                                .get("end")
-                                or ""
-                            )[:10]
-                            local_today = datetime.now().date().isoformat()
-                            if snapshot_end != local_today:
-                                execution = {
-                                    "status": "skipped",
-                                    "reason": "最新行情日期不是今天，疑似周末/节假日或行情未更新",
-                                    "snapshot_end": snapshot_end,
-                                    "local_today": local_today,
-                                    "applied": [],
-                                    "skipped": [],
-                                }
-                            else:
-                                execution = _execute_local_signals(
-                                    state,
-                                    refresh=refresh_research,
-                                    automated=True,
-                                )
-                            if execution.get("applied"):
-                                state["initialized"] = True
-                                self._write_state(state)
-                            result = {
-                                "status": "completed",
-                                "research": result,
-                                "execution": execution,
-                                "mode": "local_paper_only",
-                            }
                         storage.finish_research_run(
                             run_id, status="completed", result=result
                         )
@@ -3155,6 +5918,14 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                             ),
                         )
                     )
+                # Signal cards are cached independently from analysis rows.
+                # Invalidate that cache after a targeted LLM run so the next
+                # signal-center load reads the newly persisted result instead
+                # of showing an older same-day analysis for the symbol.
+                try:
+                    self.pool_cache_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 self._json({"results": results, "status": _get_ai_service().status()})
                 return
             if self.path == "/api/ai/replay":
@@ -3369,10 +6140,17 @@ def main() -> None:
     args = parser.parse_args()
     if args.llm_config:
         os.environ["AKQUANT_LLM_CONFIG"] = str(Path(args.llm_config).resolve())
+    root = Path(args.root).resolve()
     handler = lambda *handler_args, **handler_kwargs: ReviewCenterHandler(  # noqa: E731
-        *handler_args, directory=str(Path(args.root).resolve()), **handler_kwargs
+        *handler_args, directory=str(root), **handler_kwargs
     )
     server = ThreadingHTTPServer((args.host, args.port), handler)
+    Thread(
+        target=_daily_trade_scheduler_loop,
+        args=(root,),
+        name="daily-local-paper-trade-scheduler",
+        daemon=True,
+    ).start()
     print(
         f"AKQuant review center: http://{args.host}:{args.port}/akquant_review_center.html"
     )

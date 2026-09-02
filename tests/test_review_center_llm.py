@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -85,7 +86,10 @@ def test_strict_provider_schema_requires_all_object_properties() -> None:
 
 def test_example_config_supports_responses_deepseek_and_qwen() -> None:
     """The editable provider registry covers both API compatibility styles."""
-    config = _submodule("config").load_trade_ai_config(base_dir=ROOT)
+    config = _submodule("config").load_trade_ai_config(
+        path=ROOT / "llm_trade.example.yaml",
+        base_dir=ROOT,
+    )
     assert config.providers["codexapis"].api_style == "responses"
     assert config.providers["deepseek"].api_style == "chat_completions"
     assert config.providers["qwen"].api_style == "chat_completions"
@@ -261,6 +265,113 @@ def test_storage_persists_labels_and_performance(tmp_path: Path) -> None:
     assert report["next_5_trading_days"]["sample_count"] == 1
 
 
+def test_candidate_training_searches_platt_regularization_and_records_gate(
+    tmp_path: Path,
+) -> None:
+    storage = _submodule("storage").AnalysisStorage(
+        tmp_path / "candidate.sqlite3", tmp_path / "raw"
+    )
+    feature_names = [
+        "return_1d",
+        "return_5d",
+        "return_20d",
+        "ma5_over_ma20",
+        "ma20_over_ma60",
+        "volatility_10d",
+        "rsi14_centered",
+        "volume5_over_volume20",
+    ]
+    start = date(2026, 1, 1)
+    for day_index in range(60):
+        as_of = start + timedelta(days=day_index)
+        for symbol_index in range(4):
+            positive = (day_index + symbol_index) % 2 == 0
+            direction = 1.0 if positive else -1.0
+            analysis_id = f"candidate-{day_index}-{symbol_index}"
+            probability = 0.8 if positive else 0.2
+            storage.save(
+                {
+                    "analysis_id": analysis_id,
+                    "as_of": f"{as_of.isoformat()}T15:00:00+08:00",
+                    "instrument": {
+                        "symbol": f"00000{symbol_index}",
+                        "current_price": 10.0,
+                    },
+                    "traditional": {
+                        "close": 10.0,
+                        "selection_score": 80.0 if positive else 20.0,
+                        "model_features": {
+                            name: direction * (index + 1) / 100.0
+                            for index, name in enumerate(feature_names)
+                        },
+                        "probabilities": {
+                            "next_trading_day": {"value": probability},
+                            "next_5_trading_days": {"value": probability},
+                        },
+                    },
+                    "fusion": {
+                        "assessment_status": "historical_replay",
+                        "final_action": "observe",
+                        "final_score": 80.0 if positive else 20.0,
+                        "final_up_probabilities": {
+                            "next_trading_day": {"value": probability},
+                            "next_5_trading_days": {"value": probability},
+                        },
+                    },
+                    "audit": {"training_universe": "csi300"},
+                }
+            )
+            close = 11.0 if positive else 9.0
+            storage.label_outcome(
+                analysis_id,
+                [{"close": close, "high": close, "low": close}] * 5,
+            )
+
+    trained = storage.train_candidate_models()
+    one_day = trained["models"]["next_trading_day"]
+
+    assert trained["status"] == "candidate_ready"
+    assert {
+        "logistic_calibrated_c_0_0001",
+        "logistic_calibrated_c_0_001",
+        "logistic_calibrated_c_0_003",
+        "logistic_calibrated_c_0_01",
+    } <= set(one_day["models"])
+    assert one_day["best_candidate"]["release_gate"]["passed"] is True
+    assert one_day["release_gate"]["passed"] is True
+    calibrated = one_day["models"]["logistic_calibrated_c_0_001"]
+    assert calibrated["hyperparameters"]["C"] == pytest.approx(0.001)
+    assert calibrated["release_gate"]["passed"] is True
+    filtered = storage.train_candidate_models(
+        universe="csi300",
+        start_date="2026-01-01",
+        end_date="2026-03-31",
+    )
+    assert filtered["dataset_scope"]["symbol_count"] == 4
+    assert filtered["dataset_scope"]["unique_trading_date_count"] == 60
+    assert filtered["models"]["next_trading_day"]["sample_count"] == 240
+
+
+def test_automation_runs_are_separate_from_research_runs(tmp_path: Path) -> None:
+    storage = _submodule("storage").AnalysisStorage(
+        tmp_path / "automation.sqlite3", tmp_path / "raw"
+    )
+    run_id = storage.create_automation_run(
+        "daily_trade", {"research_performed": False}
+    )
+    storage.finish_automation_run(
+        run_id,
+        status="completed",
+        result={"status": "completed", "llm_agent_called": False},
+    )
+
+    assert storage.list_research_runs() == []
+    runs = storage.list_automation_runs()
+    assert runs[0]["run_id"] == run_id
+    assert runs[0]["action"] == "daily_trade"
+    assert runs[0]["result"]["llm_agent_called"] is False
+
+
 def test_model_release_approval_snapshot_and_rollback(tmp_path: Path) -> None:
     storage = _submodule("storage").AnalysisStorage(
         tmp_path / "release.sqlite3", tmp_path / "raw"
@@ -295,6 +406,11 @@ def test_model_release_approval_snapshot_and_rollback(tmp_path: Path) -> None:
                 },
             },
             "pbo": 0.25,
+            "strategy_distinctness": {
+                "passed": True,
+                "max_peer_trade_overlap": 0.42,
+                "maximum_allowed_overlap": 0.85,
+            },
         },
     )
     request = storage.request_model_release("challenger-v2", note="candidate ready")
@@ -319,6 +435,72 @@ def test_model_release_approval_snapshot_and_rollback(tmp_path: Path) -> None:
         "rollback",
         "publish",
     ]
+
+
+def test_release_gate_uses_strict_champion_comparison_only_for_same_strategy_and_simulator(
+    tmp_path: Path,
+) -> None:
+    storage = _submodule("storage").AnalysisStorage(
+        tmp_path / "comparison.sqlite3", tmp_path / "raw"
+    )
+    storage.register_model(
+        "champion-comparable",
+        model_name="trend_swing",
+        role="champion",
+        status="active_paper",
+        version="v1",
+        metrics={
+            "sharpe_ratio": 2.0,
+            "max_drawdown_pct": -5.0,
+            "simulator_version": "sim-v1",
+        },
+    )
+    common_metrics = {
+        "best": {
+            "sharpe_ratio": 1.5,
+            "max_drawdown_pct": -6.0,
+            "trade_count": 12,
+        },
+        "completed_trial_count": 12,
+        "cpcv_status": "valid",
+        "cpcv": {
+            "summary": {
+                "mean_test_sharpe": 0.5,
+                "positive_test_fold_ratio": 0.7,
+            }
+        },
+        "pbo": 0.2,
+        "strategy_distinctness": {
+            "passed": True,
+            "max_peer_trade_overlap": 0.3,
+            "maximum_allowed_overlap": 0.85,
+        },
+        "simulator_version": "sim-v1",
+    }
+    storage.register_model(
+        "same-strategy",
+        model_name="trend_swing",
+        role="challenger",
+        status="evaluated",
+        version="v2",
+        metrics=common_metrics,
+    )
+    storage.register_model(
+        "different-strategy",
+        model_name="momentum_regime",
+        role="challenger",
+        status="evaluated",
+        version="v2",
+        metrics=common_metrics,
+    )
+
+    same_gate = storage.evaluate_release_gate("same-strategy")
+    different_gate = storage.evaluate_release_gate("different-strategy")
+
+    assert same_gate["comparison_mode"] == "same_strategy_simulator"
+    assert same_gate["passed"] is False
+    assert different_gate["comparison_mode"] == "cross_strategy_or_version"
+    assert different_gate["passed"] is True
 
 
 def test_review_template_contains_selected_ai_analysis_and_all_headers() -> None:
@@ -357,6 +539,15 @@ def test_review_center_links_to_model_release_management() -> None:
         "质量/冲突",
     ):
         assert header in text
+
+
+def test_model_management_uses_inline_release_note_instead_of_prompt() -> None:
+    text = (ROOT / "model_management.html").read_text(encoding="utf-8")
+
+    assert "window.prompt" not in text
+    assert 'data-request-note="' in text
+    assert "发布申请说明（可选）" in text
+    assert "页面人工回滚" in text
 
 
 def test_model_output_fallback_uses_visible_fields_only() -> None:

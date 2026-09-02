@@ -4,87 +4,308 @@
       "symbol": "603629",
       "name": "利通电子",
       "self_price": 125.97,
-      "note": ""
+      "note": "",
+      "sector_name": "消费电子"
     },
     {
       "symbol": "002851",
       "name": "麦格米特",
       "self_price": 119.84,
-      "note": ""
+      "note": "",
+      "sector_name": "电源设备"
     },
     {
       "symbol": "300394",
       "name": "天孚通信",
       "self_price": 249.5,
-      "note": ""
+      "note": "",
+      "sector_name": "通信设备"
     },
     {
       "symbol": "300136",
       "name": "信维通信",
       "self_price": 58.92,
-      "note": ""
+      "note": "",
+      "sector_name": "消费电子"
     },
     {
       "symbol": "002463",
       "name": "沪电股份",
       "self_price": 119.22,
-      "note": ""
+      "note": "",
+      "sector_name": "元件"
     },
     {
       "symbol": "600487",
       "name": "亨通光电",
       "self_price": 64.83,
-      "note": ""
+      "note": "",
+      "sector_name": "通信设备"
     },
     {
       "symbol": "002192",
       "name": "融捷股份",
       "self_price": 72.17,
-      "note": ""
+      "note": "",
+      "sector_name": "能源金属"
     },
     {
       "symbol": "600378",
       "name": "昊华科技",
       "self_price": 48.46,
-      "note": ""
+      "note": "",
+      "sector_name": "化学制品"
     },
     {
       "symbol": "600183",
       "name": "生益科技",
       "self_price": 140.97,
-      "note": ""
+      "note": "",
+      "sector_name": "元件"
     },
     {
       "symbol": "300476",
       "name": "胜宏科技",
       "self_price": 241.6,
-      "note": ""
-    }
-  ],
-  "positions": [
+      "note": "",
+      "sector_name": "元件"
+    },
+    {
+      "symbol": "300857",
+      "name": "协创数据",
+      "self_price": 253.88,
+      "note": "",
+      "sector_name": "计算机设备"
+    },
+    {
+      "symbol": "603626",
+      "name": "科森科技",
+      "self_price": 19.29,
+      "note": "",
+      "sector_name": "通用设备"
+    },
+    {
+      "symbol": "000712",
+      "name": "锦龙股份",
+      "self_price": 11.8,
+      "note": "",
+      "sector_name": "证券"
+    },
+    {
+      "symbol": "600547",
+      "name": "山东黄金",
+      "self_price": 35.49,
+      "note": "",
+      "sector_name": "贵金属"
+    },
+    {
+      "symbol": "300604",
+      "name": "长川科技",
+      "self_price": 277.11,
+      "note": "",
+      "sector_name": "半导体设备"
+    },
+    {
+      "symbol": "301526",
+      "name": "国际复材",
+      "self_price": 30.2,
+      "note": "",
+      "sector_name": "化学纤维"
+    },
+    {
+      "symbol": "603256",
+      "name": "宏和科技",
+      "self_price": 139.17,
+      "note": "",
+      "sector_name": "电子材料"
+    },
+    {
+      "symbol": "000938",
+      "name": "紫光股份",
+      "self_price": 35.89,
+      "note": "",
+      "sector_name": "通信设备"
+    },
+    {
+      "symbol": "600584",
+      "name": "长电科技",
+      "self_price": 74.93,
+      "note": "",
+      "sector_name": "半导体"
+    },
+    {
+      "symbol": "301511",
+      "name": "德福科技",
+      "self_price": 90.5,
+      "note": "",
+      "sector_name": "能源金属"
+    },
+    {
+      "symbol": "300666",
+      "name": "江丰电子",
+      "self_price": 239.82,
+      "note": "",
+      "sector_name": "半导体材料"
+    },
+    {
+      "symbol": "300058",
+      "name": "蓝色光标",
+      "self_price": 13.37,
+      "note": "",
+      "sector_name": "传媒"
+    },
+    {
+      "symbol": "301171",
+      "name": "易点天下",
+      "self_price": 35.42,
+      "note": "",
+      "sector_name": "传媒"
+    },
+    {
+      "symbol": "002353",
+      "name": "杰瑞股份",
+      "self_price": 130.92,
+      "note": "",
+      "sector_name": "专用设备"
+    },
+    {
+      "symbol": "603283",
+      "name": "赛腾股份",
+      "self_price": 47.45,
+      "note": "",
+      "sector_name": "专用设备"
+    },
+    {
+      "symbol": "000725",
+      "name": "京东方Ａ",
+      "self_price": 5.92,
+      "note": "",
+      "sector_name": "光学光电子"
+    },
+    {
+      "symbol": "601212",
+      "name": "白银有色",
+      "self_price": 7.63,
+      "note": "",
+      "sector_name": "工业金属"
+    },
+    {
+      "symbol": "603259",
+      "name": "药明康德",
+      "self_price": 157.4,
+      "note": "",
+      "sector_name": "医疗服务"
+    },
+    {
+      "symbol": "301183",
+      "name": "东田微",
+      "self_price": 230.9,
+      "note": "",
+      "sector_name": "光学光电子"
+    },
+    {
+      "symbol": "300456",
+      "name": "赛微电子",
+      "self_price": 40.4,
+      "note": "",
+      "sector_name": "半导体"
+    },
+    {
+      "symbol": "603667",
+      "name": "五洲新春",
+      "self_price": 50.76,
+      "note": "",
+      "sector_name": "汽车零部件"
+    },
+    {
+      "symbol": "002837",
+      "name": "英维克",
+      "self_price": 64.48,
+      "note": "",
+      "sector_name": "专用设备"
+    },
+    {
+      "symbol": "002536",
+      "name": "飞龙股份",
+      "self_price": 53.33,
+      "note": "",
+      "sector_name": "汽车零部件"
+    },
+    {
+      "symbol": "301396",
+      "name": "宏景科技",
+      "self_price": 184.12,
+      "note": "",
+      "sector_name": "IT服务Ⅱ"
+    },
+    {
+      "symbol": "603186",
+      "name": "华正新材",
+      "self_price": 182.5,
+      "note": "",
+      "sector_name": "元件"
+    },
+    {
+      "symbol": "002436",
+      "name": "兴森科技",
+      "self_price": 36.01,
+      "note": "",
+      "sector_name": "元件"
+    },
     {
       "symbol": "600105",
       "name": "永鼎股份",
-      "quantity": 1100.0,
-      "entry_price": 40.73
-    },
-    {
-      "symbol": "002882",
-      "name": "金龙羽",
-      "quantity": 600.0,
-      "entry_price": 22.03
-    },
-    {
-      "symbol": "002192",
-      "name": "融捷股份",
-      "quantity": 200.0,
-      "entry_price": 73.19
+      "self_price": 40.28,
+      "note": "",
+      "sector_name": "通信设备"
     },
     {
       "symbol": "600362",
       "name": "江西铜业",
-      "quantity": 300.0,
-      "entry_price": 49.28
+      "self_price": 48.4,
+      "note": "",
+      "sector_name": "工业金属"
+    },
+    {
+      "symbol": "600110",
+      "name": "诺德股份",
+      "self_price": 12.03,
+      "note": "",
+      "sector_name": "电池"
+    }
+  ],
+  "positions": [
+    {
+      "symbol": "000938",
+      "name": "紫光股份",
+      "quantity": 400.0,
+      "entry_price": 36.576,
+      "sector_name": "通信设备",
+      "model_peak_price": 36.898,
+      "model_holding_bars": 0,
+      "model_last_evaluated_date": "2026-09-01",
+      "model_entry_date": "2026-09-01"
+    },
+    {
+      "symbol": "002536",
+      "name": "飞龙股份",
+      "quantity": 100.0,
+      "entry_price": 54.664,
+      "sector_name": "汽车零部件"
+    },
+    {
+      "symbol": "600547",
+      "name": "600547",
+      "quantity": 200.0,
+      "entry_price": 36.602,
+      "sector_name": "贵金属"
+    },
+    {
+      "symbol": "600183",
+      "name": "600183",
+      "quantity": 100.0,
+      "entry_price": 144.98,
+      "sector_name": "元件"
     }
   ],
   "manual_trades": [
@@ -187,7 +408,162 @@
       "quantity": 300.0,
       "net_pnl": 0.0,
       "time": "2026-08-28T11:05:48.663545+00:00"
+    },
+    {
+      "id": "manual-11",
+      "symbol": "600362",
+      "name": "江西铜业",
+      "action": "sell",
+      "price": 47.06,
+      "quantity": 300.0,
+      "net_pnl": -665.9999999999997,
+      "time": "2026-08-31T11:54:20.301539+00:00"
+    },
+    {
+      "id": "manual-12",
+      "symbol": "600105",
+      "name": "永鼎股份",
+      "action": "sell",
+      "price": 39.7,
+      "quantity": 1100.0,
+      "net_pnl": -1132.9999999999934,
+      "time": "2026-08-31T12:07:18.723748+00:00"
+    },
+    {
+      "id": "auto-13",
+      "source_signal_id": "review-601212-2026-08-31-buy",
+      "symbol": "601212",
+      "name": "白银有色",
+      "action": "buy",
+      "price": 6.87,
+      "quantity": 1400.0,
+      "net_pnl": 0.0,
+      "time": "2026-08-31T13:13:27.645143+00:00",
+      "source": "scheduled_local_research_signal"
+    },
+    {
+      "id": "auto-14",
+      "source_signal_id": "review-000938-2026-08-31-buy",
+      "symbol": "000938",
+      "name": "紫光股份",
+      "action": "buy",
+      "price": 36.254,
+      "quantity": 200.0,
+      "net_pnl": 0.0,
+      "time": "2026-08-31T13:13:27.645143+00:00",
+      "source": "scheduled_local_research_signal"
+    },
+    {
+      "id": "auto-15",
+      "source_signal_id": "review-000938-2026-09-01-buy",
+      "symbol": "000938",
+      "name": "紫光股份",
+      "action": "buy",
+      "price": 36.898,
+      "quantity": 200.0,
+      "net_pnl": 0.0,
+      "time": "2026-09-01T11:03:45.170704+00:00",
+      "source": "scheduled_local_model_signal",
+      "model_id": "challenger-momentum_regime-pool-93ed2a71823da8a9-a_share_trend_swing_mfi_v4",
+      "model_version": "pool-93ed2a71823da8a9-a_share_trend_swing_mfi_v4"
+    },
+    {
+      "id": "manual-16",
+      "symbol": "002192",
+      "name": "融捷股份",
+      "action": "sell",
+      "price": 74.13,
+      "quantity": 200.0,
+      "net_pnl": 187.99999999999955,
+      "time": "2026-09-01T11:34:00.661251+00:00"
+    },
+    {
+      "id": "manual-17",
+      "symbol": "601212",
+      "name": "白银有色",
+      "action": "sell",
+      "price": 6.87,
+      "quantity": 1400.0,
+      "net_pnl": 0.0,
+      "time": "2026-09-01T11:39:19.902451+00:00"
+    },
+    {
+      "id": "manual-18",
+      "symbol": "300489",
+      "name": "光智科技",
+      "action": "buy",
+      "price": 240.32,
+      "quantity": 100.0,
+      "net_pnl": 0.0,
+      "time": "2026-09-01T11:40:16.770134+00:00"
+    },
+    {
+      "id": "auto-19",
+      "source_signal_id": "ensemble-short_swing_ensemble_v1-300489-2026-09-02-sell",
+      "symbol": "300489",
+      "name": "光智科技",
+      "action": "sell",
+      "price": 229.35,
+      "quantity": 100.0,
+      "net_pnl": -1097.0,
+      "time": "2026-09-02T11:03:00.330092+00:00",
+      "source": "scheduled_local_model_signal",
+      "model_id": null,
+      "model_version": "short_swing_ensemble_v1"
+    },
+    {
+      "id": "manual-20",
+      "symbol": "002882",
+      "name": "金龙羽",
+      "action": "sell",
+      "price": 23.3,
+      "quantity": 1600.0,
+      "net_pnl": 2256.0,
+      "time": "2026-09-02T12:14:18.637817+00:00"
+    },
+    {
+      "id": "auto-21",
+      "source_signal_id": "review-002536-2026-09-02-buy",
+      "symbol": "002536",
+      "name": "飞龙股份",
+      "action": "buy",
+      "price": 54.664,
+      "quantity": 100.0,
+      "net_pnl": 0.0,
+      "time": "2026-09-02T16:42:57.335115+00:00",
+      "source": "local_signal",
+      "model_id": null,
+      "model_version": null
+    },
+    {
+      "id": "auto-22",
+      "source_signal_id": "review-600547-2026-09-02-buy",
+      "symbol": "600547",
+      "name": "600547",
+      "action": "buy",
+      "price": 36.602,
+      "quantity": 200.0,
+      "net_pnl": 0.0,
+      "time": "2026-09-02T16:42:57.335115+00:00",
+      "source": "local_signal",
+      "model_id": null,
+      "model_version": null
+    },
+    {
+      "id": "auto-23",
+      "source_signal_id": "review-600183-2026-09-02-buy",
+      "symbol": "600183",
+      "name": "600183",
+      "action": "buy",
+      "price": 144.98,
+      "quantity": 100.0,
+      "net_pnl": 0.0,
+      "time": "2026-09-02T16:42:57.335115+00:00",
+      "source": "local_signal",
+      "model_id": null,
+      "model_version": null
     }
   ],
+  "available_cash": 54149.6,
   "initialized": true
 }

@@ -1,55 +1,111 @@
-"""Run the scheduled local-paper research and execution cycle.
+"""Run the scheduled local-paper trading cycle.
 
 This entrypoint is safe to invoke from Windows Task Scheduler/Codex
 automation. It never connects to a broker; it updates only the local review
-center state and audit database.
+center state and automation audit database. It deliberately performs no
+research, training, optimization, model publication, LLM, or Agent calls.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+import time
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SERVER_ROOT = "http://127.0.0.1:8765"
+POLL_SECONDS = 15
+MAX_WAIT_SECONDS = 2 * 60 * 60
+
+
+def _request_json(request: Request, *, timeout: float = 30.0) -> dict:
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _wait_for_run(run_id: str) -> dict:
+    """Wait for one already-created trade run without ever duplicating it."""
+    deadline = time.monotonic() + MAX_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        request = Request(f"{SERVER_ROOT}/api/automation/runs?limit=20", method="GET")
+        payload = _request_json(request)
+        run = next(
+            (item for item in payload.get("items", []) if item.get("run_id") == run_id),
+            None,
+        )
+        if run and run.get("status") in {"completed", "failed"}:
+            return run
+        time.sleep(POLL_SECONDS)
+    raise TimeoutError(f"automated trade run timed out: {run_id}")
+
+
+def _run_in_process() -> int:
+    """Trade-only fallback used when the local HTTP service is unavailable."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import review_center_server as server
+
+    state_path = ROOT / ".review_center_state.json"
+    state = (
+        json.loads(state_path.read_text(encoding="utf-8"))
+        if state_path.exists()
+        else {
+            "positions": [],
+            "watchlist": [],
+            "manual_trades": [],
+            "initialized": True,
+        }
+    )
+    result = server._run_daily_trade_action(state, refresh=True)
+    if result.get("status") == "completed":
+        state["initialized"] = True
+        state_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(json.dumps(result, ensure_ascii=False, default=str))
+    return 1 if result.get("status") == "failed" else 0
 
 
 def main() -> int:
-    payload = json.dumps({"action": "daily_auto", "calendar_days": 60, "refresh": True}).encode("utf-8")
+    payload = json.dumps(
+        {
+            "refresh": True,
+            "background": True,
+        }
+    ).encode("utf-8")
     request = Request(
-        "http://127.0.0.1:8765/api/research/run",
+        f"{SERVER_ROOT}/api/automation/trade",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
-        with urlopen(request, timeout=300) as response:
-            print(response.read().decode("utf-8"))
-            return 0
+        created = _request_json(request)
     except (URLError, TimeoutError, OSError):
         # Fall back to an in-process execution when the static review server
         # is not running. This keeps the scheduled job self-contained.
-        sys.path.insert(0, str(ROOT / "scripts"))
-        import review_center_server as server
+        return _run_in_process()
 
-        state_path = ROOT / ".review_center_state.json"
-        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"positions": [], "watchlist": [], "manual_trades": [], "initialized": True}
-        result = server._run_research_action("full", state, calendar_days=60, refresh=True)
-        snapshot_end = str((result.get("dataset") or {}).get("snapshot", {}).get("end") or "")[:10]
-        today = datetime.now().date().isoformat()
-        result["execution"] = (
-            server._execute_local_signals(state, refresh=True, automated=True)
-            if snapshot_end == today
-            else {"status": "skipped", "reason": "最新行情日期不是今天，疑似周末/节假日或行情未更新", "snapshot_end": snapshot_end, "local_today": today, "applied": [], "skipped": []}
+    run_id = str(created.get("run_id") or "")
+    if not run_id:
+        print(json.dumps({"status": "failed", "error": "server omitted run_id"}))
+        return 1
+    try:
+        completed = _wait_for_run(run_id)
+    except (URLError, TimeoutError, OSError) as exc:
+        # A run already exists, so never fall back and create a duplicate.
+        print(
+            json.dumps(
+                {"status": "failed", "run_id": run_id, "error": str(exc)},
+                ensure_ascii=False,
+            )
         )
-        state["initialized"] = True
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(json.dumps(result, ensure_ascii=False, default=str))
-        return 0
+        return 1
+    print(json.dumps(completed, ensure_ascii=False, default=str))
+    return 0 if completed.get("status") == "completed" else 1
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1274 @@
+{
+  "status": "completed",
+  "source": "real_daily_kline_point_in_time_replay",
+  "synthetic_prices": false,
+  "window": {
+    "start": "2026-03-02",
+    "end": "2026-08-31",
+    "requested_start": "2026-03-01",
+    "requested_end": "2026-08-31",
+    "calendar_days": 180
+  },
+  "sample_count": 37738,
+  "universe": {
+    "name": "沪深300",
+    "code": "000300",
+    "source": "AKShare index_stock_cons_csindex",
+    "effective_date": "2026-09-01",
+    "constituent_count": 300,
+    "membership_mode": "current_membership_applied_to_recent_window",
+    "loaded_count": 300,
+    "error_count": 0
+  },
+  "per_symbol": {
+    "000001": 126,
+    "000002": 126,
+    "000063": 126,
+    "000100": 126,
+    "000157": 126,
+    "000166": 126,
+    "000301": 126,
+    "000333": 126,
+    "000338": 126,
+    "000408": 126,
+    "000425": 126,
+    "000538": 126,
+    "000568": 126,
+    "000596": 126,
+    "000617": 126,
+    "000625": 126,
+    "000630": 126,
+    "000651": 126,
+    "000657": 126,
+    "000708": 126,
+    "000725": 126,
+    "000768": 126,
+    "000776": 126,
+    "000792": 126,
+    "000807": 126,
+    "000858": 126,
+    "000895": 126,
+    "000938": 126,
+    "000963": 126,
+    "000975": 126,
+    "000977": 126,
+    "000988": 126,
+    "000999": 126,
+    "001280": 91,
+    "001391": 126,
+    "001965": 126,
+    "001979": 126,
+    "002001": 126,
+    "002027": 126,
+    "002028": 126,
+    "002049": 126,
+    "002050": 126,
+    "002074": 126,
+    "002142": 126,
+    "002179": 126,
+    "002202": 126,
+    "002230": 126,
+    "002236": 126,
+    "002241": 126,
+    "002304": 126,
+    "002311": 126,
+    "002352": 126,
+    "002353": 126,
+    "002371": 126,
+    "002384": 126,
+    "002415": 126,
+    "002422": 126,
+    "002460": 126,
+    "002463": 126,
+    "002466": 126,
+    "002475": 126,
+    "002493": 126,
+    "002532": 126,
+    "002558": 126,
+    "002594": 126,
+    "002600": 126,
+    "002602": 126,
+    "002625": 126,
+    "002648": 126,
+    "002709": 126,
+    "002714": 126,
+    "002736": 126,
+    "002837": 126,
+    "002916": 126,
+    "002920": 126,
+    "002938": 126,
+    "003816": 126,
+    "300014": 126,
+    "300015": 126,
+    "300033": 126,
+    "300059": 126,
+    "300122": 126,
+    "300124": 126,
+    "300251": 126,
+    "300274": 126,
+    "300308": 126,
+    "300316": 126,
+    "300394": 126,
+    "300408": 126,
+    "300413": 126,
+    "300418": 126,
+    "300433": 126,
+    "300442": 126,
+    "300450": 126,
+    "300476": 126,
+    "300498": 126,
+    "300502": 126,
+    "300628": 126,
+    "300661": 126,
+    "300750": 126,
+    "300760": 126,
+    "300803": 126,
+    "300832": 126,
+    "300866": 126,
+    "300896": 126,
+    "300999": 126,
+    "301165": 126,
+    "301236": 126,
+    "301269": 126,
+    "301308": 126,
+    "302132": 126,
+    "600000": 126,
+    "600009": 126,
+    "600010": 126,
+    "600011": 126,
+    "600015": 126,
+    "600016": 126,
+    "600018": 126,
+    "600019": 126,
+    "600023": 126,
+    "600025": 126,
+    "600026": 126,
+    "600027": 126,
+    "600028": 126,
+    "600029": 126,
+    "600030": 126,
+    "600031": 126,
+    "600036": 126,
+    "600039": 126,
+    "600048": 126,
+    "600050": 126,
+    "600061": 126,
+    "600066": 126,
+    "600085": 126,
+    "600089": 126,
+    "600104": 126,
+    "600111": 126,
+    "600115": 126,
+    "600118": 126,
+    "600150": 126,
+    "600160": 126,
+    "600176": 126,
+    "600183": 126,
+    "600188": 126,
+    "600196": 126,
+    "600219": 126,
+    "600221": 126,
+    "600233": 126,
+    "600276": 126,
+    "600309": 126,
+    "600346": 126,
+    "600362": 126,
+    "600372": 126,
+    "600406": 126,
+    "600415": 126,
+    "600426": 126,
+    "600436": 126,
+    "600438": 119,
+    "600460": 126,
+    "600482": 126,
+    "600489": 126,
+    "600515": 126,
+    "600519": 126,
+    "600522": 126,
+    "600547": 126,
+    "600549": 126,
+    "600570": 126,
+    "600584": 126,
+    "600585": 126,
+    "600588": 126,
+    "600600": 126,
+    "600660": 126,
+    "600674": 126,
+    "600690": 126,
+    "600741": 126,
+    "600760": 126,
+    "600795": 126,
+    "600803": 126,
+    "600809": 126,
+    "600845": 126,
+    "600875": 126,
+    "600886": 126,
+    "600887": 126,
+    "600893": 126,
+    "600900": 126,
+    "600905": 126,
+    "600918": 126,
+    "600919": 126,
+    "600926": 126,
+    "600930": 126,
+    "600938": 126,
+    "600941": 126,
+    "600958": 116,
+    "600989": 126,
+    "600999": 126,
+    "601006": 126,
+    "601009": 126,
+    "601012": 126,
+    "601018": 126,
+    "601021": 126,
+    "601058": 126,
+    "601059": 126,
+    "601066": 126,
+    "601077": 126,
+    "601088": 126,
+    "601100": 126,
+    "601111": 126,
+    "601117": 126,
+    "601127": 126,
+    "601136": 126,
+    "601138": 126,
+    "601166": 126,
+    "601169": 126,
+    "601186": 126,
+    "601211": 126,
+    "601225": 126,
+    "601229": 126,
+    "601238": 126,
+    "601288": 126,
+    "601318": 126,
+    "601319": 126,
+    "601328": 126,
+    "601336": 126,
+    "601360": 126,
+    "601377": 126,
+    "601390": 126,
+    "601398": 126,
+    "601456": 126,
+    "601600": 126,
+    "601601": 126,
+    "601607": 126,
+    "601618": 126,
+    "601628": 126,
+    "601633": 126,
+    "601658": 126,
+    "601668": 126,
+    "601669": 126,
+    "601688": 126,
+    "601689": 126,
+    "601698": 126,
+    "601727": 126,
+    "601728": 126,
+    "601766": 126,
+    "601788": 126,
+    "601800": 126,
+    "601816": 126,
+    "601818": 126,
+    "601825": 126,
+    "601838": 126,
+    "601857": 126,
+    "601868": 126,
+    "601872": 126,
+    "601877": 126,
+    "601878": 126,
+    "601881": 126,
+    "601888": 126,
+    "601898": 126,
+    "601899": 126,
+    "601901": 126,
+    "601916": 126,
+    "601919": 126,
+    "601939": 126,
+    "601985": 126,
+    "601988": 126,
+    "601995": 126,
+    "601998": 126,
+    "603019": 126,
+    "603259": 126,
+    "603260": 126,
+    "603288": 126,
+    "603296": 126,
+    "603369": 126,
+    "603392": 126,
+    "603501": 126,
+    "603799": 126,
+    "603893": 126,
+    "603986": 126,
+    "603993": 126,
+    "605117": 126,
+    "605499": 126,
+    "688008": 126,
+    "688009": 126,
+    "688012": 126,
+    "688036": 126,
+    "688041": 126,
+    "688047": 126,
+    "688072": 116,
+    "688082": 126,
+    "688111": 126,
+    "688126": 126,
+    "688183": 126,
+    "688223": 126,
+    "688256": 126,
+    "688271": 126,
+    "688303": 126,
+    "688396": 126,
+    "688472": 126,
+    "688506": 126,
+    "688521": 126,
+    "688981": 126
+  },
+  "errors": {},
+  "performance": {
+    "next_trading_day": {
+      "sample_count": 39715,
+      "status": "valid",
+      "brier_score": 0.262089448697227,
+      "auc": 0.49425294991520463,
+      "precision": 0.46398432790837857,
+      "recall": 0.4963193810112299,
+      "calibration_error": 0.030262930251355624
+    },
+    "next_5_trading_days": {
+      "sample_count": 38441,
+      "status": "valid",
+      "brier_score": 0.28801581500704904,
+      "auc": 0.48447312518034436,
+      "precision": 0.4459939551407816,
+      "recall": 0.47751788350175994,
+      "calibration_error": 0.033223142127477345
+    },
+    "release_gate": {
+      "status": "pending_real_data",
+      "message": "最小样本量、评价窗口和发布门槛将在首批真实数据积累后确定。"
+    }
+  },
+  "training": {
+    "status": "candidate_ready",
+    "models": {
+      "next_trading_day": {
+        "status": "candidate",
+        "sample_count": 37738,
+        "train_count": 29638,
+        "test_count": 7800,
+        "split": {
+          "method": "date_grouped_purged_holdout",
+          "train_end": "2026-07-23",
+          "test_start": "2026-07-27",
+          "purge_trading_days": 1
+        },
+        "models": {
+          "logistic": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "none",
+            "hyperparameters": {
+              "C": 0.01
+            },
+            "sample_count": 37738,
+            "train_count": 29638,
+            "test_count": 7800,
+            "train_end": "2026-07-23",
+            "test_start": "2026-07-27",
+            "purge_trading_days": 1,
+            "accuracy": 0.5165384615384615,
+            "brier_score": 0.2506572209454857,
+            "log_loss": 0.6944838648265871,
+            "auc": 0.5260905923280804,
+            "precision_at_k": 0.566025641025641,
+            "precision": 0.5853365384615384,
+            "calibration_error": 0.0507432787354635,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {
+              "return_1d": -0.08387266713191327,
+              "return_5d": 0.008030637988020353,
+              "return_20d": -0.01062392838416968,
+              "ma5_over_ma20": 0.05565817602296067,
+              "ma20_over_ma60": -0.049549942171432146,
+              "volatility_10d": 0.04879056659429027,
+              "rsi14_centered": 0.05030314857565791,
+              "volume5_over_volume20": -0.07221339361035874,
+              "traditional_score": -0.02011897310349592,
+              "swing_score": -0.02128850850226161,
+              "traditional_next_day_probability": -0.031619178868807184,
+              "traditional_five_day_probability": 0.004481631810483487,
+              "next_day_probability_missing": 0.0,
+              "five_day_probability_missing": 0.0021994286583604684,
+              "meta_signal": 0.020009123585249637
+            },
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.5260905923280804,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.2506572209454857,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "gradient_boosting": {
+            "status": "candidate",
+            "model_name": "hist_gradient_boosting",
+            "calibration_method": "none",
+            "hyperparameters": {
+              "max_iter": 100,
+              "learning_rate": 0.035,
+              "max_leaf_nodes": 7,
+              "min_samples_leaf": 25,
+              "l2_regularization": 1.0
+            },
+            "sample_count": 37738,
+            "train_count": 29638,
+            "test_count": 7800,
+            "train_end": "2026-07-23",
+            "test_start": "2026-07-27",
+            "purge_trading_days": 1,
+            "accuracy": 0.4991025641025641,
+            "brier_score": 0.2521100379319277,
+            "log_loss": 0.6974085987232295,
+            "auc": 0.5231691923467131,
+            "precision_at_k": 0.5307692307692308,
+            "precision": 0.5121951219512195,
+            "calibration_error": 0.09658392201940795,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.5231691923467131,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.2521100379319277,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "logistic_calibrated_c_0_0001": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "hyperparameters": {
+              "C": 0.0001,
+              "calibration_cv": 3
+            },
+            "sample_count": 37738,
+            "train_count": 29638,
+            "test_count": 7800,
+            "train_end": "2026-07-23",
+            "test_start": "2026-07-27",
+            "purge_trading_days": 1,
+            "accuracy": 0.49833333333333335,
+            "brier_score": 0.25284934376712,
+            "log_loss": 0.6988774065469723,
+            "auc": 0.4540932769075475,
+            "precision_at_k": 0.4480769230769231,
+            "precision": 0.0,
+            "calibration_error": 0.0483943381321591,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.4540932769075475,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.25284934376712,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "logistic_calibrated_c_0_001": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "hyperparameters": {
+              "C": 0.001,
+              "calibration_cv": 3
+            },
+            "sample_count": 37738,
+            "train_count": 29638,
+            "test_count": 7800,
+            "train_end": "2026-07-23",
+            "test_start": "2026-07-27",
+            "purge_trading_days": 1,
+            "accuracy": 0.49833333333333335,
+            "brier_score": 0.25248565609682316,
+            "log_loss": 0.6981416875621779,
+            "auc": 0.4644597957728787,
+            "precision_at_k": 0.4532051282051282,
+            "precision": 0.0,
+            "calibration_error": 0.047776937697328936,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.4644597957728787,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.25248565609682316,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "logistic_calibrated_c_0_003": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "hyperparameters": {
+              "C": 0.003,
+              "calibration_cv": 3
+            },
+            "sample_count": 37738,
+            "train_count": 29638,
+            "test_count": 7800,
+            "train_end": "2026-07-23",
+            "test_start": "2026-07-27",
+            "purge_trading_days": 1,
+            "accuracy": 0.49833333333333335,
+            "brier_score": 0.2524107364162823,
+            "log_loss": 0.6979903262971469,
+            "auc": 0.46676015006346877,
+            "precision_at_k": 0.45576923076923076,
+            "precision": 0.0,
+            "calibration_error": 0.04761663552631562,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.46676015006346877,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.2524107364162823,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "logistic_calibrated_c_0_01": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "hyperparameters": {
+              "C": 0.01,
+              "calibration_cv": 3
+            },
+            "sample_count": 37738,
+            "train_count": 29638,
+            "test_count": 7800,
+            "train_end": "2026-07-23",
+            "test_start": "2026-07-27",
+            "purge_trading_days": 1,
+            "accuracy": 0.49833333333333335,
+            "brier_score": 0.25240724927090835,
+            "log_loss": 0.6979833198604305,
+            "auc": 0.46693648338367466,
+            "precision_at_k": 0.4634615384615385,
+            "precision": 0.0,
+            "calibration_error": 0.04755540355161142,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.46693648338367466,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.25240724927090835,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          }
+        },
+        "best_candidate": {
+          "key": "logistic",
+          "status": "candidate",
+          "model_name": "logistic",
+          "calibration_method": "none",
+          "hyperparameters": {
+            "C": 0.01
+          },
+          "sample_count": 37738,
+          "train_count": 29638,
+          "test_count": 7800,
+          "train_end": "2026-07-23",
+          "test_start": "2026-07-27",
+          "purge_trading_days": 1,
+          "accuracy": 0.5165384615384615,
+          "brier_score": 0.2506572209454857,
+          "log_loss": 0.6944838648265871,
+          "auc": 0.5260905923280804,
+          "precision_at_k": 0.566025641025641,
+          "precision": 0.5853365384615384,
+          "calibration_error": 0.0507432787354635,
+          "feature_names": [
+            "return_1d",
+            "return_5d",
+            "return_20d",
+            "ma5_over_ma20",
+            "ma20_over_ma60",
+            "volatility_10d",
+            "rsi14_centered",
+            "volume5_over_volume20",
+            "traditional_score",
+            "swing_score",
+            "traditional_next_day_probability",
+            "traditional_five_day_probability",
+            "next_day_probability_missing",
+            "five_day_probability_missing",
+            "meta_signal"
+          ],
+          "feature_importance": {
+            "return_1d": -0.08387266713191327,
+            "return_5d": 0.008030637988020353,
+            "return_20d": -0.01062392838416968,
+            "ma5_over_ma20": 0.05565817602296067,
+            "ma20_over_ma60": -0.049549942171432146,
+            "volatility_10d": 0.04879056659429027,
+            "rsi14_centered": 0.05030314857565791,
+            "volume5_over_volume20": -0.07221339361035874,
+            "traditional_score": -0.02011897310349592,
+            "swing_score": -0.02128850850226161,
+            "traditional_next_day_probability": -0.031619178868807184,
+            "traditional_five_day_probability": 0.004481631810483487,
+            "next_day_probability_missing": 0.0,
+            "five_day_probability_missing": 0.0021994286583604684,
+            "meta_signal": 0.020009123585249637
+          },
+          "release_gate": {
+            "passed": false,
+            "checks": {
+              "auc": {
+                "actual": 0.5260905923280804,
+                "required": ">=0.55",
+                "passed": false
+              },
+              "brier_score": {
+                "actual": 0.2506572209454857,
+                "required": "<=0.25",
+                "passed": false
+              }
+            }
+          }
+        },
+        "release_gate": {
+          "passed": false,
+          "checks": {
+            "auc": {
+              "actual": 0.5260905923280804,
+              "required": ">=0.55",
+              "passed": false
+            },
+            "brier_score": {
+              "actual": 0.2506572209454857,
+              "required": "<=0.25",
+              "passed": false
+            }
+          }
+        },
+        "meta_labeling": {
+          "status": "enabled",
+          "rule": "swing_score >= 58 as base signal"
+        },
+        "baseline_vs_challenger": {
+          "baseline_model": "logistic",
+          "baseline": 0.2506572209454857,
+          "challenger_model": "logistic",
+          "challenger": 0.2506572209454857
+        }
+      },
+      "next_5_trading_days": {
+        "status": "candidate",
+        "sample_count": 36538,
+        "train_count": 27538,
+        "test_count": 7500,
+        "split": {
+          "method": "date_grouped_purged_holdout",
+          "train_end": "2026-07-14",
+          "test_start": "2026-07-22",
+          "purge_trading_days": 5
+        },
+        "models": {
+          "logistic": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "none",
+            "hyperparameters": {
+              "C": 0.01
+            },
+            "sample_count": 36538,
+            "train_count": 27538,
+            "test_count": 7500,
+            "train_end": "2026-07-14",
+            "test_start": "2026-07-22",
+            "purge_trading_days": 5,
+            "accuracy": 0.5184,
+            "brier_score": 0.25249463716704335,
+            "log_loss": 0.6982797212851357,
+            "auc": 0.5082904738091327,
+            "precision_at_k": 0.5273333333333333,
+            "precision": 0.5307748008689356,
+            "calibration_error": 0.08441712318530849,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {
+              "return_1d": 0.020169858324721884,
+              "return_5d": 0.025538853052875746,
+              "return_20d": -0.16706243974712356,
+              "ma5_over_ma20": 0.13063080146803316,
+              "ma20_over_ma60": -0.018618123525456477,
+              "volatility_10d": 0.05933281366498477,
+              "rsi14_centered": 0.17698270943773428,
+              "volume5_over_volume20": -0.12935510250174287,
+              "traditional_score": -0.0778856371729877,
+              "swing_score": -0.07729500165399614,
+              "traditional_next_day_probability": -0.02932586567156485,
+              "traditional_five_day_probability": 0.006518219335984438,
+              "next_day_probability_missing": 0.0,
+              "five_day_probability_missing": 0.004331484044025739,
+              "meta_signal": 0.04812440127277549
+            },
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.5082904738091327,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.25249463716704335,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "gradient_boosting": {
+            "status": "candidate",
+            "model_name": "hist_gradient_boosting",
+            "calibration_method": "none",
+            "hyperparameters": {
+              "max_iter": 100,
+              "learning_rate": 0.035,
+              "max_leaf_nodes": 7,
+              "min_samples_leaf": 25,
+              "l2_regularization": 1.0
+            },
+            "sample_count": 36538,
+            "train_count": 27538,
+            "test_count": 7500,
+            "train_end": "2026-07-14",
+            "test_start": "2026-07-22",
+            "purge_trading_days": 5,
+            "accuracy": 0.5202666666666667,
+            "brier_score": 0.25139733574059103,
+            "log_loss": 0.6960313877119799,
+            "auc": 0.5286579911322375,
+            "precision_at_k": 0.5293333333333333,
+            "precision": 0.5362637362637362,
+            "calibration_error": 0.07029167501321577,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.5286579911322375,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.25139733574059103,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "logistic_calibrated_c_0_0001": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "hyperparameters": {
+              "C": 0.0001,
+              "calibration_cv": 3
+            },
+            "sample_count": 36538,
+            "train_count": 27538,
+            "test_count": 7500,
+            "train_end": "2026-07-14",
+            "test_start": "2026-07-22",
+            "purge_trading_days": 5,
+            "accuracy": 0.5070666666666667,
+            "brier_score": 0.2557682832448717,
+            "log_loss": 0.7048695458486937,
+            "auc": 0.42933589365513086,
+            "precision_at_k": 0.43533333333333335,
+            "precision": 0.0,
+            "calibration_error": 0.1354709148291043,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.42933589365513086,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.2557682832448717,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "logistic_calibrated_c_0_001": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "hyperparameters": {
+              "C": 0.001,
+              "calibration_cv": 3
+            },
+            "sample_count": 36538,
+            "train_count": 27538,
+            "test_count": 7500,
+            "train_end": "2026-07-14",
+            "test_start": "2026-07-22",
+            "purge_trading_days": 5,
+            "accuracy": 0.5070666666666667,
+            "brier_score": 0.2550688496147035,
+            "log_loss": 0.7034325418467083,
+            "auc": 0.4380056432250183,
+            "precision_at_k": 0.442,
+            "precision": 0.0,
+            "calibration_error": 0.13508335330159618,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.4380056432250183,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.2550688496147035,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "logistic_calibrated_c_0_003": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "hyperparameters": {
+              "C": 0.003,
+              "calibration_cv": 3
+            },
+            "sample_count": 36538,
+            "train_count": 27538,
+            "test_count": 7500,
+            "train_end": "2026-07-14",
+            "test_start": "2026-07-22",
+            "purge_trading_days": 5,
+            "accuracy": 0.5070666666666667,
+            "brier_score": 0.25431345388900306,
+            "log_loss": 0.7018815421794283,
+            "auc": 0.4465894022848724,
+            "precision_at_k": 0.44333333333333336,
+            "precision": 0.0,
+            "calibration_error": 0.07160534476761515,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.4465894022848724,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.25431345388900306,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          },
+          "logistic_calibrated_c_0_01": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "hyperparameters": {
+              "C": 0.01,
+              "calibration_cv": 3
+            },
+            "sample_count": 36538,
+            "train_count": 27538,
+            "test_count": 7500,
+            "train_end": "2026-07-14",
+            "test_start": "2026-07-22",
+            "purge_trading_days": 5,
+            "accuracy": 0.5070666666666667,
+            "brier_score": 0.25391277139558,
+            "log_loss": 0.7010611551890227,
+            "auc": 0.45192373004499176,
+            "precision_at_k": 0.45666666666666667,
+            "precision": 0.0,
+            "calibration_error": 0.05626632376852603,
+            "feature_names": [
+              "return_1d",
+              "return_5d",
+              "return_20d",
+              "ma5_over_ma20",
+              "ma20_over_ma60",
+              "volatility_10d",
+              "rsi14_centered",
+              "volume5_over_volume20",
+              "traditional_score",
+              "swing_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "meta_signal"
+            ],
+            "feature_importance": {},
+            "release_gate": {
+              "passed": false,
+              "checks": {
+                "auc": {
+                  "actual": 0.45192373004499176,
+                  "required": ">=0.55",
+                  "passed": false
+                },
+                "brier_score": {
+                  "actual": 0.25391277139558,
+                  "required": "<=0.25",
+                  "passed": false
+                }
+              }
+            }
+          }
+        },
+        "best_candidate": {
+          "key": "gradient_boosting",
+          "status": "candidate",
+          "model_name": "hist_gradient_boosting",
+          "calibration_method": "none",
+          "hyperparameters": {
+            "max_iter": 100,
+            "learning_rate": 0.035,
+            "max_leaf_nodes": 7,
+            "min_samples_leaf": 25,
+            "l2_regularization": 1.0
+          },
+          "sample_count": 36538,
+          "train_count": 27538,
+          "test_count": 7500,
+          "train_end": "2026-07-14",
+          "test_start": "2026-07-22",
+          "purge_trading_days": 5,
+          "accuracy": 0.5202666666666667,
+          "brier_score": 0.25139733574059103,
+          "log_loss": 0.6960313877119799,
+          "auc": 0.5286579911322375,
+          "precision_at_k": 0.5293333333333333,
+          "precision": 0.5362637362637362,
+          "calibration_error": 0.07029167501321577,
+          "feature_names": [
+            "return_1d",
+            "return_5d",
+            "return_20d",
+            "ma5_over_ma20",
+            "ma20_over_ma60",
+            "volatility_10d",
+            "rsi14_centered",
+            "volume5_over_volume20",
+            "traditional_score",
+            "swing_score",
+            "traditional_next_day_probability",
+            "traditional_five_day_probability",
+            "next_day_probability_missing",
+            "five_day_probability_missing",
+            "meta_signal"
+          ],
+          "feature_importance": {},
+          "release_gate": {
+            "passed": false,
+            "checks": {
+              "auc": {
+                "actual": 0.5286579911322375,
+                "required": ">=0.55",
+                "passed": false
+              },
+              "brier_score": {
+                "actual": 0.25139733574059103,
+                "required": "<=0.25",
+                "passed": false
+              }
+            }
+          }
+        },
+        "release_gate": {
+          "passed": false,
+          "checks": {
+            "auc": {
+              "actual": 0.5286579911322375,
+              "required": ">=0.55",
+              "passed": false
+            },
+            "brier_score": {
+              "actual": 0.25139733574059103,
+              "required": "<=0.25",
+              "passed": false
+            }
+          }
+        },
+        "meta_labeling": {
+          "status": "enabled",
+          "rule": "swing_score >= 58 as base signal"
+        },
+        "baseline_vs_challenger": {
+          "baseline_model": "logistic",
+          "baseline": 0.25249463716704335,
+          "challenger_model": "gradient_boosting",
+          "challenger": 0.25139733574059103
+        }
+      }
+    },
+    "dataset_scope": {
+      "universe": "csi300",
+      "requested_start": "2026-03-01",
+      "requested_end": "2026-08-31",
+      "row_count": 37738,
+      "symbol_count": 300,
+      "unique_trading_date_count": 126,
+      "effective_independence_note": "同一交易日的横截面股票共享市场状态；独立时间样本更接近交易日期数而非总行数。"
+    },
+    "release_policy": "仅评估 challenger，不自动替换线上模型。"
+  },
+  "leakage_control": {
+    "features": "prediction bar t and earlier",
+    "labels": "future 1/5 trading bars",
+    "llm_calls": 0
+  }
+}

@@ -136,9 +136,12 @@
   }
 
   function finishRun(run) {
+    const interrupted = run.status === "interrupted";
     const failed = run.status === "failed";
-    const label = failed ? "研究失败" : "研究完成";
-    const detail = failed ? run.error || "未返回错误详情" : `run_id=${run.run_id}`;
+    const label = interrupted ? "研究已中断" : (failed ? "研究失败" : "研究完成");
+    const detail = (failed || interrupted)
+      ? run.error || "未返回错误详情"
+      : `run_id=${run.run_id}`;
     sessionStorage.removeItem(storageKey);
     activeRunId = "";
     activeStartedAt = null;
@@ -146,7 +149,7 @@
     window.clearInterval(elapsedTimer);
     setButtonsBusy(false);
     if (statusNode) {
-      statusNode.className = `status research-status-prominent ${failed ? "research-failed" : "research-success"}`;
+      statusNode.className = `status research-status-prominent ${(failed || interrupted) ? "research-failed" : "research-success"}`;
       statusNode.textContent = `${label} · ${run.action} · ${detail}`;
     }
     notify(`${label}：${detail}`, failed);
@@ -155,7 +158,7 @@
 
   async function pollResearchRun() {
     try {
-      const response = await fetch("/api/research/runs?limit=10", { cache: "no-store" });
+      const response = await fetch("/api/research/runs?limit=10&summary=1", { cache: "no-store" });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
       const runs = Array.isArray(body.items) ? body.items : [];
@@ -169,7 +172,7 @@
       }
       if (activeRunId && activeRunId !== "pending") {
         const finished = runs.find((item) => item.run_id === activeRunId);
-        if (finished && ["completed", "failed"].includes(finished.status)) finishRun(finished);
+        if (finished && ["completed", "failed", "interrupted"].includes(finished.status)) finishRun(finished);
       } else if (pendingSubmission && statusNode) {
         statusNode.className = "status research-status-prominent research-running";
         statusNode.innerHTML = '<span class="research-spinner" aria-hidden="true"></span><span>一键研究已提交，正在创建任务记录…</span>';
@@ -246,6 +249,12 @@
     true,
   );
 
-  pollTimer = window.setInterval(pollResearchRun, 2000);
+  // Check once on page load so a job started elsewhere is still discovered,
+  // then poll only while a real job is active.  The previous unconditional
+  // 2-second polling repeatedly decoded all historical research results and
+  // made an idle signal center unnecessarily slow.
   pollResearchRun();
+  pollTimer = window.setInterval(() => {
+    if (activeRunId || pendingSubmission) pollResearchRun();
+  }, 2000);
 })();

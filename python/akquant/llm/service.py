@@ -69,6 +69,18 @@ class TradeAnalysisService:
         provider_context = {
             "schema_version": "1.3",
             "analysis_as_of": as_of,
+            # Keep the requested security identity explicit and separate from
+            # the account's other holdings.  Without this block, a provider
+            # can mistake a portfolio position (for example 紫光股份) for the
+            # stock being analyzed (for example 山东黄金), especially when the
+            # target is an observation-pool symbol with no position payload.
+            "target_instrument": {
+                "symbol": symbol,
+                "name": instrument.get("name") or symbol,
+                "market": instrument.get("market") or "A股",
+                "pool": instrument.get("pool"),
+                "current_price": instrument.get("current_price"),
+            },
             "prediction_horizons": self.config.strategy.prediction_horizons,
             "data_quality": context.get("data_quality") or {},
             "market_context": context.get("market_context") or {},
@@ -156,7 +168,7 @@ class TradeAnalysisService:
                 "prompt_sha256": self.prompt.sha256,
                 "knowledge_version": self.knowledge.version,
                 "knowledge_sha256": self.knowledge.sha256,
-                "traditional_strategy_version": "review_center_momentum_logit_dual_horizon_v2",
+                "traditional_strategy_version": "review_center_momentum_logit_mfi_v3",
                 "provider": self.config.active_provider,
                 "provider_model": self.config.provider.model,
                 "response_id": provider_result.response_id,
@@ -381,6 +393,10 @@ def _compact_traditional(traditional: dict[str, Any]) -> dict[str, Any]:
         "momentum60",
         "rsi14",
         "volume_ratio",
+        "mfi14",
+        "mfi_regime",
+        "mfi_filter",
+        "limit_up_days_5",
         "atr14",
         "support_price",
         "resistance_price",

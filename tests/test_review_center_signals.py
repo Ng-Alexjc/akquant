@@ -61,6 +61,71 @@ def test_analyze_series_ranks_uptrend_above_downtrend() -> None:
     assert uptrend["training_samples"] >= 100
     assert uptrend["resistance_price"] > uptrend["close"]
     assert uptrend["support_price"] < uptrend["close"]
+    assert 0.0 <= uptrend["mfi14"] <= 100.0
+    assert uptrend["mfi_filter"]["regime"] in {
+        "normal_trend",
+        "main_rise",
+        "limit_up_chain",
+    }
+
+
+def test_swing_score_prioritizes_five_day_probability_over_raw_technical_score() -> None:
+    traditional = SERVER._llm_submodule("traditional")
+    high_technical_weak_probabilities = traditional.swing_composite_score(
+        72.0, 0.45, 0.45
+    )
+    earlier_swing_setup = traditional.swing_composite_score(62.0, 0.58, 0.68)
+    five_day_strength = traditional.swing_composite_score(60.0, 0.50, 0.70)
+    one_day_spike = traditional.swing_composite_score(60.0, 0.70, 0.50)
+
+    assert earlier_swing_setup > high_technical_weak_probabilities
+    assert five_day_strength > one_day_spike
+
+
+def test_mfi_thresholds_preserve_main_rise_and_limit_up_strength() -> None:
+    assert SERVER._mfi_filter(29.9, "normal_trend")["passed"] is False
+    assert SERVER._mfi_filter(50.0, "normal_trend")["passed"] is True
+    assert SERVER._mfi_filter(85.1, "normal_trend")["passed"] is False
+    assert SERVER._mfi_filter(90.0, "main_rise")["passed"] is True
+    assert SERVER._mfi_filter(90.0, "limit_up_chain")["passed"] is True
+    assert SERVER._mfi_filter(59.9, "limit_up_chain")["passed"] is False
+
+
+def test_mfi_failure_downgrades_new_entry_to_waiting() -> None:
+    state = {
+        "watchlist": [{"symbol": "HOT"}],
+        "positions": [],
+        "manual_trades": [],
+    }
+    quote = {
+        "symbol": "HOT",
+        "name": "普通趋势过热票",
+        "current_price": 120.0,
+        "analysis": {
+            "available": True,
+            "as_of": "2026-08-31",
+            "close": 120.0,
+            "ma5": 118.0,
+            "ma20": 110.0,
+            "ma60": 100.0,
+            "momentum20": 0.10,
+            "atr14": 2.0,
+            "selection_score": 77.0,
+            "up_probability": 0.66,
+            "probabilities": {
+                "next_trading_day": {"value": 0.66},
+                "next_5_trading_days": {"value": 0.68},
+            },
+            "trend": "多头排列",
+            "trend_direction": "上升",
+            "mfi14": 90.0,
+            "mfi_filter": SERVER._mfi_filter(90.0, "normal_trend"),
+        },
+    }
+    signal = SERVER._pool_signals(state, [quote])[0]
+    assert signal["action"] == "等待买入"
+    assert signal["execution_signal"] is None
+    assert "MFI" in signal["trigger"]
 
 
 def test_pool_signals_rank_candidates_and_trigger_buy_sell() -> None:
@@ -89,6 +154,10 @@ def test_pool_signals_rank_candidates_and_trigger_buy_sell() -> None:
                 "atr14": 2.0,
                 "selection_score": 82.0,
                 "up_probability": 0.66,
+                "probabilities": {
+                    "next_trading_day": {"value": 0.66},
+                    "next_5_trading_days": {"value": 0.70},
+                },
                 "validation_accuracy": 0.58,
                 "trend": "多头排列",
                 "trend_direction": "上升",
@@ -109,6 +178,10 @@ def test_pool_signals_rank_candidates_and_trigger_buy_sell() -> None:
                 "atr14": 2.0,
                 "selection_score": 18.0,
                 "up_probability": 0.30,
+                "probabilities": {
+                    "next_trading_day": {"value": 0.30},
+                    "next_5_trading_days": {"value": 0.28},
+                },
                 "validation_accuracy": 0.55,
                 "trend": "空头排列",
                 "trend_direction": "下降",
@@ -128,6 +201,10 @@ def test_pool_signals_rank_candidates_and_trigger_buy_sell() -> None:
                 "atr14": 1.0,
                 "selection_score": 99.0,
                 "up_probability": 0.9,
+                "probabilities": {
+                    "next_trading_day": {"value": 0.90},
+                    "next_5_trading_days": {"value": 0.90},
+                },
                 "trend": "多头排列",
                 "trend_direction": "上升",
             },
@@ -146,6 +223,10 @@ def test_pool_signals_rank_candidates_and_trigger_buy_sell() -> None:
                 "atr14": 1.0,
                 "selection_score": 62.0,
                 "up_probability": 0.52,
+                "probabilities": {
+                    "next_trading_day": {"value": 0.52},
+                    "next_5_trading_days": {"value": 0.57},
+                },
                 "trend": "趋势混合",
                 "trend_direction": "偏强",
             },
@@ -164,6 +245,10 @@ def test_pool_signals_rank_candidates_and_trigger_buy_sell() -> None:
                 "atr14": 1.0,
                 "selection_score": 55.0,
                 "up_probability": 0.51,
+                "probabilities": {
+                    "next_trading_day": {"value": 0.51},
+                    "next_5_trading_days": {"value": 0.50},
+                },
                 "trend": "趋势混合",
                 "trend_direction": "震荡",
             },

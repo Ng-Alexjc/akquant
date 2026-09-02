@@ -11,6 +11,93 @@ MAX_SAMPLES = 360
 MIN_TRAIN_SAMPLES = 30
 NEUTRAL_LOWER = 0.48
 NEUTRAL_UPPER = 0.52
+FEATURE_NAMES = [
+    "return_1d",
+    "return_5d",
+    "return_20d",
+    "ma5_over_ma20",
+    "ma20_over_ma60",
+    "volatility_10d",
+    "rsi14_centered",
+    "volume5_over_volume20",
+]
+SWING_SCORE_WEIGHTS = {
+    "technical_score": 0.45,
+    "next_trading_day_probability": 0.20,
+    "next_5_trading_days_probability": 0.35,
+}
+
+
+def swing_composite_score(
+    technical_score: float,
+    next_day_probability: float | None,
+    five_day_probability: float | None,
+    next_day_validation: dict[str, Any] | None = None,
+    five_day_validation: dict[str, Any] | None = None,
+) -> float:
+    """Blend technical quality with both probability horizons for swing trades.
+
+    The five-day horizon receives the largest probability weight because the
+    target style is a short trend swing rather than a one-day scalp. Missing
+    horizons are excluded and the remaining weights are normalized, so an
+    unavailable forecast does not silently become a bearish zero.
+    """
+    components: list[tuple[float, float]] = [
+        (
+            max(0.0, min(100.0, float(technical_score))),
+            SWING_SCORE_WEIGHTS["technical_score"],
+        )
+    ]
+    for probability, key, validation in (
+        (
+            next_day_probability,
+            "next_trading_day_probability",
+            next_day_validation,
+        ),
+        (
+            five_day_probability,
+            "next_5_trading_days_probability",
+            five_day_validation,
+        ),
+    ):
+        if probability is None:
+            continue
+        value = float(probability)
+        if math.isfinite(value):
+            components.append(
+                (
+                    max(0.0, min(1.0, value)) * 100.0,
+                    SWING_SCORE_WEIGHTS[key]
+                    * probability_reliability(validation),
+                )
+            )
+    total_weight = sum(weight for _, weight in components)
+    if total_weight <= 0:
+        return round(max(0.0, min(100.0, float(technical_score))), 1)
+    return round(
+        sum(value * weight for value, weight in components) / total_weight,
+        1,
+    )
+
+
+def probability_reliability(validation: dict[str, Any] | None) -> float:
+    """Convert validation metrics into a conservative probability weight."""
+    if not validation:
+        return 0.5
+    components: list[float] = []
+    auc = validation.get("auc")
+    if auc is not None:
+        components.append(max(0.0, min(1.0, (float(auc) - 0.48) / 0.12)))
+    brier = validation.get("brier_score")
+    if brier is not None:
+        components.append(max(0.0, min(1.0, (0.30 - float(brier)) / 0.08)))
+    if not components:
+        accuracy = validation.get("accuracy")
+        if accuracy is not None:
+            components.append(
+                max(0.0, min(1.0, (float(accuracy) - 0.45) / 0.15))
+            )
+    return sum(components) / len(components) if components else 0.5
 
 
 def _mean(values: list[float]) -> float:
@@ -310,3 +397,94 @@ def predict_all_horizons(closes: list[float], volumes: list[float]) -> dict[str,
             "next_5_trading_days": next_five,
         },
     }
+
+
+def historical_probability_rows(
+    closes: list[float],
+    volumes: list[float],
+    target_indices: list[int],
+) -> dict[int, dict[str, Any]]:
+    """Replay leakage-free point-in-time probabilities for historical closes.
+
+    For a prediction made at bar ``t``, a training observation ending at bar
+    ``e`` is eligible only when its forward label is already observable at
+    ``t`` (``e + horizon <= t``).  This is intentionally lighter than the live
+    evaluator: it fits one expanding model per requested date/horizon and lets
+    the downstream candidate trainer perform the held-out evaluation.
+    """
+    if len(closes) != len(volumes):
+        raise ValueError("closes 与 volumes 长度必须一致")
+    valid_targets = sorted(
+        {
+            int(index)
+            for index in target_indices
+            if 60 <= int(index) < len(closes)
+        }
+    )
+    if not valid_targets:
+        return {}
+
+    feature_cache = {
+        index: feature_row(closes, volumes, index)
+        for index in range(60, len(closes))
+    }
+    rows: dict[int, dict[str, Any]] = {index: {} for index in valid_targets}
+    for horizon, horizon_name in (
+        (1, "next_trading_day"),
+        (5, "next_5_trading_days"),
+    ):
+        for target in valid_targets:
+            latest = feature_cache.get(target)
+            eligible_end = target - horizon
+            pairs = [
+                (feature_cache.get(end), 1 if closes[end + horizon] > closes[end] else 0)
+                for end in range(60, eligible_end + 1)
+                if feature_cache.get(end) is not None
+            ]
+            if len(pairs) > MAX_SAMPLES:
+                pairs = pairs[-MAX_SAMPLES:]
+            features = [list(item[0]) for item in pairs if item[0] is not None]
+            labels = [int(item[1]) for item in pairs if item[0] is not None]
+            if latest is None or len(features) < MIN_TRAIN_SAMPLES:
+                rows[target][horizon_name] = {
+                    "value": None,
+                    "valid": False,
+                    "assessment_status": "insufficient_data",
+                    "training_samples": len(features),
+                    "unavailable_reason": "历史时点有效训练样本不足",
+                    "validation": {"method": "point_in_time_expanding_replay"},
+                }
+                continue
+            if len(set(labels)) < 2:
+                rows[target][horizon_name] = {
+                    "value": None,
+                    "valid": False,
+                    "assessment_status": "unavailable",
+                    "training_samples": len(features),
+                    "unavailable_reason": "历史时点训练标签只有一个类别",
+                    "validation": {"method": "point_in_time_expanding_replay"},
+                }
+                continue
+            model = _model()
+            model.fit(features, labels)
+            probability = max(
+                0.0,
+                min(1.0, float(model.predict_proba([latest])[0][1])),
+            )
+            rows[target][horizon_name] = {
+                "value": probability,
+                "raw_value": probability,
+                "valid": True,
+                "assessment_status": (
+                    "valid_neutral"
+                    if NEUTRAL_LOWER <= probability <= NEUTRAL_UPPER
+                    else "valid_directional"
+                ),
+                "training_samples": len(features),
+                "unavailable_reason": None,
+                "validation": {
+                    "method": "point_in_time_expanding_replay",
+                    "label_observation_rule": "feature_end + horizon <= prediction_bar",
+                },
+            }
+    return rows

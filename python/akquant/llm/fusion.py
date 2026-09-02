@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import FusionConfig
 from .schemas import LLMTradeAnalysis
+from .traditional import swing_composite_score
 
 ACTION_ORDER = [
     "观察",
@@ -82,12 +83,25 @@ def price_plan(technical: dict[str, Any], current_price: float) -> dict[str, Any
 def _traditional_action(traditional: dict[str, Any], holding: bool) -> str | None:
     if not traditional.get("available", True):
         return None
-    score = float(traditional.get("selection_score") or 0)
+    technical_score = float(traditional.get("selection_score") or 0)
     probability = (
         (traditional.get("probabilities") or {}).get("next_trading_day") or {}
     ).get("value")
-    if probability is None:
+    five_day_probability = (
+        (traditional.get("probabilities") or {}).get("next_5_trading_days") or {}
+    ).get("value")
+    if probability is None or five_day_probability is None:
         return None
+    score = float(
+        traditional.get("swing_score")
+        or swing_composite_score(
+            technical_score,
+            float(probability),
+            float(five_day_probability),
+            ((traditional.get("probabilities") or {}).get("next_trading_day") or {}).get("validation"),
+            ((traditional.get("probabilities") or {}).get("next_5_trading_days") or {}).get("validation"),
+        )
+    )
     price = float(traditional.get("close") or 0)
     ma20 = float(traditional.get("ma20") or 0)
     ma60 = float(traditional.get("ma60") or 0)
@@ -95,16 +109,20 @@ def _traditional_action(traditional: dict[str, Any], holding: bool) -> str | Non
     if holding:
         if price < ma60 and momentum < 0:
             return "清仓"
-        if probability <= 0.40 and price < ma20:
+        if probability <= 0.40 and float(five_day_probability) <= 0.46 and price < ma20:
             return "减仓"
-        if score >= 75 and probability >= 0.60 and price > ma20 > ma60:
+        if score >= 70 and probability >= 0.58 and float(five_day_probability) >= 0.62 and price > ma20 > ma60:
             return "加仓"
         return "持有"
-    if score >= 72 and probability >= 0.58 and price > ma20 > ma60:
+    if score >= 68 and probability >= 0.56 and float(five_day_probability) >= 0.60 and price > ma20 > ma60:
         return "买入"
-    if score >= 65 and probability >= 0.54 and price > ma20:
+    if score >= 62 and probability >= 0.52 and float(five_day_probability) >= 0.56 and price > ma20:
         return "买入"
-    return "等待买入" if score >= 60 and probability >= 0.50 else "观察"
+    return (
+        "等待买入"
+        if score >= 58 and probability >= 0.49 and float(five_day_probability) >= 0.52
+        else "观察"
+    )
 
 
 def fuse(
@@ -142,7 +160,16 @@ def fuse(
         else 0.0
     )
     traditional_weight = 1.0 - llm_weight
-    traditional_score = float(traditional.get("selection_score") or 0)
+    traditional_score = float(
+        traditional.get("swing_score")
+        or swing_composite_score(
+            float(traditional.get("selection_score") or 0),
+            ((traditional.get("probabilities") or {}).get("next_trading_day") or {}).get("value"),
+            ((traditional.get("probabilities") or {}).get("next_5_trading_days") or {}).get("value"),
+            ((traditional.get("probabilities") or {}).get("next_trading_day") or {}).get("validation"),
+            ((traditional.get("probabilities") or {}).get("next_5_trading_days") or {}).get("validation"),
+        )
+    )
     if valid_llm and llm.score is not None:
         score_delta = _clip(
             (llm.score - traditional_score) * llm_weight,

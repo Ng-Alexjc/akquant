@@ -1,0 +1,268 @@
+{
+  "status": "completed",
+  "source": "real_daily_kline_point_in_time_replay",
+  "synthetic_prices": false,
+  "window": {
+    "start": "2026-06-30",
+    "end": "2026-08-27",
+    "calendar_days": 60
+  },
+  "sample_count": 559,
+  "per_symbol": {
+    "600105": 43,
+    "002882": 43,
+    "002192": 43,
+    "600362": 43,
+    "603629": 43,
+    "002851": 43,
+    "300394": 43,
+    "300136": 43,
+    "002463": 43,
+    "600487": 43,
+    "600378": 43,
+    "600183": 43,
+    "300476": 43
+  },
+  "errors": {},
+  "performance": {
+    "next_trading_day": {
+      "sample_count": 580,
+      "status": "valid",
+      "brier_score": 0.26709837663753344,
+      "auc": 0.4954426850627301,
+      "precision": 0.46647230320699706,
+      "recall": 0.5776173285198556,
+      "calibration_error": 0.054209381820266245
+    },
+    "next_5_trading_days": {
+      "sample_count": 507,
+      "status": "valid",
+      "brier_score": 0.3058873001381348,
+      "auc": 0.4882309495520375,
+      "precision": 0.40969162995594716,
+      "recall": 0.4449760765550239,
+      "calibration_error": 0.06713234710342064
+    },
+    "release_gate": {
+      "status": "pending_real_data",
+      "message": "最小样本量、评价窗口和发布门槛将在首批真实数据积累后确定。"
+    }
+  },
+  "training": {
+    "status": "candidate_ready",
+    "models": {
+      "next_trading_day": {
+        "status": "candidate",
+        "sample_count": 581,
+        "train_count": 464,
+        "test_count": 117,
+        "models": {
+          "logistic": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "none",
+            "sample_count": 581,
+            "train_count": 464,
+            "test_count": 117,
+            "accuracy": 0.4017094017094017,
+            "brier_score": 0.2883666342102917,
+            "log_loss": 0.772039675854601,
+            "auc": 0.4748928352725046,
+            "precision_at_k": 0.43478260869565216,
+            "precision": 0.6666666666666666,
+            "calibration_error": 0.19754759494266128,
+            "feature_names": [
+              "traditional_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "fusion_score",
+              "data_quality",
+              "meta_signal"
+            ],
+            "feature_importance": {
+              "traditional_score": -0.2688820201369737,
+              "traditional_next_day_probability": 0.0016701282395677622,
+              "traditional_five_day_probability": 0.04574477172533634,
+              "next_day_probability_missing": 0.0,
+              "five_day_probability_missing": 0.0,
+              "fusion_score": -0.2688820201369737,
+              "data_quality": 0.0,
+              "meta_signal": 0.2938265498581972
+            }
+          },
+          "gradient_boosting": {
+            "status": "candidate",
+            "model_name": "hist_gradient_boosting",
+            "calibration_method": "none",
+            "sample_count": 581,
+            "train_count": 464,
+            "test_count": 117,
+            "accuracy": 0.37606837606837606,
+            "brier_score": 0.39998048131227915,
+            "log_loss": 1.123101818275726,
+            "auc": 0.43845682792406615,
+            "precision_at_k": 0.43478260869565216,
+            "precision": 0.46153846153846156,
+            "calibration_error": 0.2514726975759304,
+            "feature_names": [
+              "traditional_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "fusion_score",
+              "data_quality",
+              "meta_signal"
+            ],
+            "feature_importance": {}
+          },
+          "logistic_calibrated": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "sample_count": 581,
+            "train_count": 464,
+            "test_count": 117,
+            "accuracy": 0.39316239316239315,
+            "brier_score": 0.27937747223442855,
+            "log_loss": 0.7528529390086208,
+            "auc": 0.48775260257195346,
+            "precision_at_k": 0.4782608695652174,
+            "precision": 0.0,
+            "calibration_error": 0.2003386313787859,
+            "feature_names": [
+              "traditional_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "fusion_score",
+              "data_quality",
+              "meta_signal"
+            ],
+            "feature_importance": {}
+          }
+        },
+        "meta_labeling": {
+          "status": "enabled",
+          "rule": "selection_score >= 60 as base signal"
+        },
+        "baseline_vs_challenger": {
+          "baseline": 0.2883666342102917,
+          "challenger": 0.39998048131227915
+        }
+      },
+      "next_5_trading_days": {
+        "status": "candidate",
+        "sample_count": 507,
+        "train_count": 405,
+        "test_count": 102,
+        "models": {
+          "logistic": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "none",
+            "sample_count": 507,
+            "train_count": 405,
+            "test_count": 102,
+            "accuracy": 0.5980392156862745,
+            "brier_score": 0.2748782776831773,
+            "log_loss": 0.7774728614844324,
+            "auc": 0.46341463414634143,
+            "precision_at_k": 0.45,
+            "precision": 0.5,
+            "calibration_error": 0.1449279985554267,
+            "feature_names": [
+              "traditional_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "fusion_score",
+              "data_quality",
+              "meta_signal"
+            ],
+            "feature_importance": {
+              "traditional_score": -0.28579361195840025,
+              "traditional_next_day_probability": 0.2649774879658114,
+              "traditional_five_day_probability": -0.12138218876391886,
+              "next_day_probability_missing": 0.0,
+              "five_day_probability_missing": 0.0,
+              "fusion_score": -0.28579361195840025,
+              "data_quality": 0.0,
+              "meta_signal": -0.05665775870512034
+            }
+          },
+          "gradient_boosting": {
+            "status": "candidate",
+            "model_name": "hist_gradient_boosting",
+            "calibration_method": "none",
+            "sample_count": 507,
+            "train_count": 405,
+            "test_count": 102,
+            "accuracy": 0.5196078431372549,
+            "brier_score": 0.33815717768054265,
+            "log_loss": 1.1057973283252962,
+            "auc": 0.3990403838464614,
+            "precision_at_k": 0.35,
+            "precision": 0.3333333333333333,
+            "calibration_error": 0.21317427198477742,
+            "feature_names": [
+              "traditional_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "fusion_score",
+              "data_quality",
+              "meta_signal"
+            ],
+            "feature_importance": {}
+          },
+          "logistic_calibrated": {
+            "status": "candidate",
+            "model_name": "logistic",
+            "calibration_method": "platt_sigmoid",
+            "sample_count": 507,
+            "train_count": 405,
+            "test_count": 102,
+            "accuracy": 0.5980392156862745,
+            "brier_score": 0.24254093813515898,
+            "log_loss": 0.6781231744166171,
+            "auc": 0.492203118752499,
+            "precision_at_k": 0.4,
+            "precision": 0.0,
+            "calibration_error": 0.03584091098542539,
+            "feature_names": [
+              "traditional_score",
+              "traditional_next_day_probability",
+              "traditional_five_day_probability",
+              "next_day_probability_missing",
+              "five_day_probability_missing",
+              "fusion_score",
+              "data_quality",
+              "meta_signal"
+            ],
+            "feature_importance": {}
+          }
+        },
+        "meta_labeling": {
+          "status": "enabled",
+          "rule": "selection_score >= 60 as base signal"
+        },
+        "baseline_vs_challenger": {
+          "baseline": 0.2748782776831773,
+          "challenger": 0.33815717768054265
+        }
+      }
+    },
+    "release_policy": "仅评估 challenger，不自动替换线上模型。"
+  },
+  "leakage_control": {
+    "features": "prediction bar t and earlier",
+    "labels": "future 1/5 trading bars",
+    "llm_calls": 0
+  }
+}
