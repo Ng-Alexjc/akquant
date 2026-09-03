@@ -722,6 +722,29 @@ class AnalysisStorage:
         candidate = self.get_model(model_id, include_snapshot=False)
         if candidate is None:
             raise ValueError(f"模型不存在: {model_id}")
+        # Once a candidate has been published, its live registry role changes
+        # from challenger to champion/archived and a fresh evaluation would
+        # incorrectly fail the role/status checks.  Preserve the immutable
+        # gate decision recorded with the publish event for UI/report audits.
+        with self._connect() as connection:
+            published = connection.execute(
+                "SELECT gate_json,release_id,created_at FROM model_releases "
+                "WHERE model_id=? AND action='publish' ORDER BY created_at DESC LIMIT 1",
+                (model_id,),
+            ).fetchone()
+        if published is not None:
+            try:
+                stored_gate = json.loads(published["gate_json"] or "{}")
+            except Exception:
+                stored_gate = {}
+            if isinstance(stored_gate, dict) and stored_gate.get("passed") is True:
+                return {
+                    **stored_gate,
+                    "model_id": model_id,
+                    "published": True,
+                    "release_id": published["release_id"],
+                    "evaluated_at": published["created_at"],
+                }
         champion = self.active_champion(include_snapshot=False)
         metrics = dict(candidate.get("metrics") or {})
         champion_metrics = dict((champion or {}).get("metrics") or {})
@@ -851,7 +874,47 @@ class AnalysisStorage:
         release_id = "release-" + hashlib.sha256(f"publish|{model_id}|{now}".encode("utf-8")).hexdigest()[:16]
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM model_registry ORDER BY created_at").fetchall()
-            snapshot = [dict(row) for row in rows]
+            # Registry metrics contain full Optuna trial payloads and can be
+            # hundreds of MB per model.  Release history only needs an
+            # immutable lineage/audit snapshot, not duplicated trial arrays;
+            # storing the full rows exceeds SQLite's maximum string/blob size
+            # and makes an otherwise valid release impossible.
+            snapshot = []
+            for row in rows:
+                item = dict(row)
+                raw_metrics = item.get("metrics_json")
+                try:
+                    parsed_metrics = json.loads(raw_metrics or "{}")
+                except Exception:
+                    parsed_metrics = {}
+                best = dict(parsed_metrics.get("best") or {})
+                item["metrics_json"] = json.dumps(
+                    {
+                        "best": {
+                            "params": best.get("params") or {},
+                            "sharpe_ratio": best.get("sharpe_ratio"),
+                            "total_return_pct": best.get("total_return_pct"),
+                            "max_drawdown_pct": best.get("max_drawdown_pct"),
+                            "trade_count": best.get("trade_count"),
+                            "completed_trade_count": best.get("completed_trade_count"),
+                            "win_rate": best.get("win_rate"),
+                        },
+                        "simulator_version": parsed_metrics.get("simulator_version"),
+                        "cpcv_status": parsed_metrics.get("cpcv_status"),
+                        "cpcv": {
+                            "summary": dict((parsed_metrics.get("cpcv") or {}).get("summary") or {})
+                        },
+                        "pbo": parsed_metrics.get("pbo"),
+                        "release_gate": parsed_metrics.get("release_gate"),
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )
+                # Older registry rows may themselves contain multi‑MB release
+                # snapshots. Never recursively embed those snapshots into a
+                # new release history record.
+                item["version_snapshot_json"] = None
+                snapshot.append(item)
             previous = connection.execute(
                 """SELECT model_id FROM model_registry
                 WHERE role='champion' AND status='active_paper'

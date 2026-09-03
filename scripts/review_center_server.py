@@ -1518,6 +1518,26 @@ def _code(symbol: str) -> str:
     return str(symbol).strip().upper()
 
 
+def _miaoxiang_quota_message(value: Any) -> str | None:
+    """Extract a user-actionable 妙想 quota/credit exhaustion message."""
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            if message := _miaoxiang_quota_message(item):
+                return message
+        return None
+    if isinstance(value, dict):
+        for item in value.values():
+            if message := _miaoxiang_quota_message(item):
+                return message
+        return None
+    text = str(value or "")
+    if not text:
+        return None
+    lowered = text.lower()
+    markers = ("积分已用完", "积分不足", "额度已用完", "额度不足", "购买套餐", "quota", "credit")
+    return text if any(marker in text or marker in lowered for marker in markers) else None
+
+
 def _secid(symbol: str) -> str:
     code = _code(symbol)
     # 沪市股票/ETF 以 1 开头,深市/北交所以 0 开头,足够覆盖 A 股票池查询。
@@ -1862,6 +1882,12 @@ def _stock_kline_miaoxiang(symbol: str) -> dict[str, Any]:
     if response is None:
         raise last_error or RuntimeError("妙想 MCP 未返回个股行情")
     payload = _mcp_json(response) or {}
+    # 妙想 may return a successful MCP envelope containing a quota/permission
+    # message instead of a data table. Preserve that actionable reason rather
+    # than collapsing it into the misleading generic "OHLCV incomplete" error.
+    message = str(payload.get("message") or "").strip()
+    if message:
+        raise RuntimeError(f"妙想行情不可用: {message}")
     date_re = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
     def number(value: Any) -> float | None:
@@ -1994,7 +2020,11 @@ def _stock_kline_sina(symbol: str) -> dict[str, Any]:
     }
 
 
-def stock_kline(symbol: str, refresh: bool = False) -> dict[str, Any]:
+def stock_kline(
+    symbol: str,
+    refresh: bool = False,
+    allowed_providers: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     """Return a short-lived cached quote/K-line payload for one A-share."""
     code = _code(symbol)
     now = time.monotonic()
@@ -2002,11 +2032,34 @@ def stock_kline(symbol: str, refresh: bool = False) -> dict[str, Any]:
         with _STOCK_KLINE_CACHE_LOCK:
             cached = _STOCK_KLINE_CACHE.get(code)
         if cached and now - cached[0] < QUOTE_CACHE_TTL_SECONDS:
-            return cached[1]
+            cached_result = cached[1]
+            if allowed_providers is None:
+                return cached_result
+            source = str(cached_result.get("quote_source") or "").lower()
+            source_ok = any(
+                (name == "miaoxiang" and source.startswith("妙想:"))
+                or (name == "tencent" and source.startswith("tencent"))
+                or (name == "eastmoney" and "eastmoney" in source)
+                or (name == "sina" and "sina" in source)
+                for name in allowed_providers
+            )
+            if source_ok:
+                return cached_result
     errors: list[str] = []
-    # 妙想 MCP is the authoritative first choice.  Tencent is the first
-    # market-data fallback; Eastmoney/Sina remain additional resilience paths.
-    for provider in (_stock_kline_miaoxiang, _stock_kline_tencent, _stock_kline_eastmoney, _stock_kline_sina):
+    provider_map = {
+        "miaoxiang": _stock_kline_miaoxiang,
+        "tencent": _stock_kline_tencent,
+        "eastmoney": _stock_kline_eastmoney,
+        "sina": _stock_kline_sina,
+    }
+    provider_order = (
+        tuple(provider_map[name] for name in allowed_providers if name in provider_map)
+        if allowed_providers is not None
+        else (_stock_kline_miaoxiang, _stock_kline_tencent, _stock_kline_eastmoney, _stock_kline_sina)
+    )
+    # 妙想 MCP is authoritative. Research callers may restrict the chain to
+    # 妙想→腾讯 so an outage never silently creates a downgraded snapshot.
+    for provider in provider_order:
         try:
             result = provider(code)
             break
@@ -2014,6 +2067,16 @@ def stock_kline(symbol: str, refresh: bool = False) -> dict[str, Any]:
             errors.append(f"{provider.__name__}: {exc}")
     else:
         raise RuntimeError(f"行情接口均失败({code}): {' | '.join(errors)}")
+    if errors:
+        # Keep fallback use explicit in the payload so the UI/report can show
+        # why a lower-priority source was selected instead of implying that
+        # the authoritative source served the data.
+        result = dict(result)
+        result["degraded"] = True
+        result["provider_diagnostics"] = errors
+        result["requested_provider_order"] = [
+            name for name in (allowed_providers or ("miaoxiang", "tencent", "eastmoney", "sina"))
+        ]
     with _STOCK_KLINE_CACHE_LOCK:
         _STOCK_KLINE_CACHE[code] = (now, result)
     return result
@@ -2804,14 +2867,26 @@ def _csi300_constituents() -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 
 def _csi300_research_items(
-    *, refresh: bool = True
+    *, refresh: bool = True, allowed_providers: tuple[str, ...] | None = None
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Fetch CSI 300 daily K-lines concurrently for historical ML replay."""
     constituents, metadata = _csi300_constituents()
+    if allowed_providers:
+        # Fail fast on an unavailable authoritative chain before launching
+        # hundreds of concurrent requests. This is especially important when
+        # 妙想 returns a quota message: a research run must not spend minutes
+        # collecting lower-priority fallback data that will be rejected later.
+        probe_symbol = str(constituents[0]["symbol"])
+        stock_kline(
+            probe_symbol, refresh=refresh, allowed_providers=allowed_providers
+        )
 
     def load_item(item: dict[str, Any]) -> dict[str, Any]:
         try:
-            quote = stock_kline(str(item["symbol"]), refresh=refresh)
+            quote = stock_kline(
+                str(item["symbol"]), refresh=refresh,
+                allowed_providers=allowed_providers,
+            )
             return {
                 **item,
                 "name": _repair_text(quote.get("name"), str(item.get("name") or item["symbol"])),
@@ -2828,7 +2903,8 @@ def _csi300_research_items(
 
 
 def _csi300_plus_watchlist_research_items(
-    state: dict[str, Any], *, refresh: bool = True
+    state: dict[str, Any], *, refresh: bool = True,
+    allowed_providers: tuple[str, ...] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Return the de-duplicated union of current CSI 300 and local watchlist.
 
@@ -2838,7 +2914,9 @@ def _csi300_plus_watchlist_research_items(
     point-in-time daily K-line source so downstream replay and simulation use
     one consistent data contract.
     """
-    csi_items, csi_metadata = _csi300_research_items(refresh=refresh)
+    csi_items, csi_metadata = _csi300_research_items(
+        refresh=refresh, allowed_providers=allowed_providers
+    )
     merged: dict[str, dict[str, Any]] = {
         str(item.get("symbol")): dict(item)
         for item in csi_items
@@ -2854,7 +2932,9 @@ def _csi300_plus_watchlist_research_items(
     def load_extra(symbol: str) -> dict[str, Any]:
         source = watchlist_symbols[symbol]
         try:
-            quote = stock_kline(symbol, refresh=refresh)
+            quote = stock_kline(
+                symbol, refresh=refresh, allowed_providers=allowed_providers
+            )
             return {
                 **source,
                 "symbol": symbol,
@@ -2944,7 +3024,9 @@ def _backfill_historical_ml_samples(
     normalized_universe = str(universe or "pool").strip().lower()
     if normalized_universe in {"csi300", "hs300", "沪深300"}:
         normalized_universe = "csi300"
-        items, universe_metadata = _csi300_research_items(refresh=refresh)
+        items, universe_metadata = _csi300_research_items(
+            refresh=refresh, allowed_providers=RESEARCH_ALLOWED_PROVIDERS
+        )
     elif normalized_universe in {
         "csi300_plus_watchlist",
         "csi300+watchlist",
@@ -2955,7 +3037,7 @@ def _backfill_historical_ml_samples(
     }:
         normalized_universe = "csi300_plus_watchlist"
         items, universe_metadata = _csi300_plus_watchlist_research_items(
-            state, refresh=refresh
+            state, refresh=refresh, allowed_providers=RESEARCH_ALLOWED_PROVIDERS
         )
     elif normalized_universe == "pool":
         items = _research_pool_items(state, refresh=refresh)
@@ -3186,9 +3268,13 @@ def _run_research_action(
         )
     if action in {"backtest", "labels", "metrics", "optimize", "full"}:
         if str(universe).lower() == "csi300":
-            items, universe_meta = _csi300_research_items(refresh=refresh)
+            items, universe_meta = _csi300_research_items(
+                refresh=refresh, allowed_providers=RESEARCH_ALLOWED_PROVIDERS
+            )
         elif str(universe).lower() == "csi300_plus_watchlist":
-            items, universe_meta = _csi300_plus_watchlist_research_items(state, refresh=refresh)
+            items, universe_meta = _csi300_plus_watchlist_research_items(
+                state, refresh=refresh, allowed_providers=RESEARCH_ALLOWED_PROVIDERS
+            )
         else:
             items = _research_pool_items(state, refresh=refresh)
             universe_meta = {"loaded_count": len(items), "error_count": 0}
@@ -4226,6 +4312,10 @@ def _sector_strength_value(signal: dict[str, Any]) -> float:
 
 
 MAX_LOCAL_POSITIONS = 4
+# Training/research must not silently use a lower-priority source.  The live
+# UI may still use the full resilience chain, but reproducible model artifacts
+# accept only the user's requested 妙想→腾讯 order.
+RESEARCH_ALLOWED_PROVIDERS = ("miaoxiang", "tencent")
 
 
 def _active_champion_runtime_policy(storage: Any | None = None) -> dict[str, Any] | None:
@@ -4284,9 +4374,10 @@ def _active_ensemble_runtime_policy(storage: Any | None = None) -> dict[str, Any
     # three-model ensemble even when their individual registry role is now
     # archived/superseded.
     usable_statuses = {"active_paper", "superseded", "rolled_back"}
+    eligible: list[dict[str, Any]] = []
     for row in rows:
         strategy = str(row.get("model_name") or "")
-        if strategy not in MODEL_ENSEMBLE_WEIGHTS or strategy in by_strategy:
+        if strategy not in MODEL_ENSEMBLE_WEIGHTS:
             continue
         if row.get("status") not in usable_statuses or not row.get("published_at"):
             continue
@@ -4294,7 +4385,29 @@ def _active_ensemble_runtime_policy(storage: Any | None = None) -> dict[str, Any
         # A registry row without optimized params cannot provide a distinct
         # model signal; skip it and let the next historical row fill the slot.
         if policy["params"]:
-            by_strategy[strategy] = policy
+            eligible.append(policy)
+    # Select one complete published cohort.  During staged publication of the
+    # three components, this keeps the live ensemble on the previous complete
+    # cohort instead of mixing old and new strategy versions.
+    cohorts: dict[str, dict[str, dict[str, Any]]] = {}
+    for policy in eligible:
+        cohorts.setdefault(str(policy.get("version") or ""), {})[
+            str(policy.get("model_name") or "")
+        ] = policy
+    complete = [
+        (version, cohort)
+        for version, cohort in cohorts.items()
+        if all(name in cohort for name in MODEL_ENSEMBLE_WEIGHTS)
+    ]
+    if complete:
+        _, selected = max(
+            complete,
+            key=lambda item: max(
+                str(item[1][name].get("published_at") or "")
+                for name in MODEL_ENSEMBLE_WEIGHTS
+            ),
+        )
+        by_strategy = selected
     return {
         "mode": "weighted_vote",
         "model_name": "short_swing_ensemble",
@@ -4982,6 +5095,10 @@ def _run_daily_trade_action(
             "pool_refresh_status": "stale",
             "pool_refresh_stale_symbols": stale_symbols,
         }
+    # Keep the Champion lookup as an auditable compatibility hook for callers
+    # and older integrations; the actual runtime decision uses the published
+    # three-model ensemble below.
+    _active_champion_runtime_policy()
     model = _active_ensemble_runtime_policy()
     if model is None:
         return {
@@ -5286,6 +5403,17 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                     signals = _active_ensemble_signals(
                         signals, watchlist + positions, state, active_model
                     )
+                miaoxiang_quota_messages = list(
+                    dict.fromkeys(
+                        message
+                        for item in (watchlist + positions)
+                        for diagnostic in (
+                            item.get("quote_error"),
+                            item.get("provider_diagnostics"),
+                        )
+                        if (message := _miaoxiang_quota_message(diagnostic))
+                    )
+                )
                 response_payload = {
                         "watchlist": public_watchlist,
                         "positions": public_positions,
@@ -5303,6 +5431,16 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                         "as_of": _now_iso(),
                         "_cache_version": POOL_CACHE_VERSION,
                         "cache": {"status": "refreshed" if refresh else "miss"},
+                        "alerts": [
+                            {
+                                "code": "miaoxiang_quota_exhausted",
+                                "level": "warning",
+                                "title": "妙想 MCP 积分已用完",
+                                "message": "刷新行情时检测到妙想 MCP 积分/额度已用完。当前标的未使用妙想数据，请补充额度后再刷新。",
+                                "details": miaoxiang_quota_messages[:3],
+                            }
+                        ] if miaoxiang_quota_messages else [],
+                        "miaoxiang_quota_exhausted": bool(miaoxiang_quota_messages),
                     }
                 if refresh:
                     # Quotes and derived signals changed; force the next
@@ -5478,6 +5616,35 @@ class ReviewCenterHandler(SimpleHTTPRequestHandler):
                 self._json(stock_kline(symbol, refresh=refresh))
                 return
         except Exception as exc:  # noqa: BLE001 - convert upstream errors to API JSON
+            # A transient upstream/provider or concurrent refresh failure must
+            # not blank the signal center.  Serve the last valid pool snapshot
+            # with an explicit stale/error marker so the UI can remain usable
+            # while making the failed refresh auditable.
+            if parsed.path == "/api/pools":
+                try:
+                    cached_payload = self._read_json_cache(self.pool_cache_path)
+                except Exception:  # noqa: BLE001 - fall through to JSON error
+                    cached_payload = None
+                if isinstance(cached_payload, dict) and cached_payload.get("_cache_version") == POOL_CACHE_VERSION:
+                    cached_payload["cache"] = {
+                        "status": "stale_error",
+                        "source": POOL_CACHE_FILE,
+                        "error": str(exc),
+                    }
+                    alerts = list(cached_payload.get("alerts") or [])
+                    alerts.append(
+                        {
+                            "code": "pools_refresh_failed",
+                            "level": "warning",
+                            "title": "行情刷新暂时失败",
+                            "message": "本次刷新未完成，已暂时显示最近一次有效票池数据；请稍后重试。",
+                            "details": [str(exc)],
+                        }
+                    )
+                    cached_payload["alerts"] = alerts
+                    cached_payload["refresh_error"] = str(exc)
+                    self._json(cached_payload)
+                    return
             self._json({"error": str(exc)}, status=502)
             return
         super().do_GET()
