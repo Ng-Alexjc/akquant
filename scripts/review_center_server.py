@@ -3711,7 +3711,33 @@ def _backtest_dashboard_payload(
     ai_status = dict(ai_status or service.status())
     pool_payload = dict(pool_payload or {})
 
-    runs = storage.list_research_runs(limit=20)
+    # Load only lightweight run metadata first.  The newest optimize result
+    # can be hundreds of megabytes and decoding it on every report refresh
+    # blocks the HTTP response.  Fetch the single selected artifact lazily.
+    try:
+        runs = storage.list_research_runs(limit=20, include_results=False)
+    except TypeError:  # backwards-compatible storage/test doubles
+        runs = storage.list_research_runs(limit=20)
+    completed_full = next(
+        (
+            item for item in runs
+            if item.get("status") == "completed" and item.get("action") == "full"
+        ),
+        None,
+    )
+    completed_other = next(
+        (
+            item for item in runs
+            if item.get("status") == "completed"
+            and item.get("action") in {"full", "optimize", "backtest", "daily_auto"}
+        ),
+        None,
+    )
+    selected_run_id = str((completed_full or completed_other or {}).get("run_id") or "")
+    if selected_run_id and hasattr(storage, "get_research_run"):
+        selected = storage.get_research_run(selected_run_id, include_result=True)
+        if selected:
+            runs = [selected] + [item for item in runs if item.get("run_id") != selected_run_id]
     # Prefer a complete research artifact for report-wide fields.  An
     # ``optimize`` run is intentionally compact and omits dataset quality and
     # Walk-Forward summaries; selecting it first makes the dashboard display

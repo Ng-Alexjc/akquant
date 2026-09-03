@@ -492,6 +492,36 @@ class AnalysisStorage:
             items.append(item)
         return items
 
+    def get_research_run(
+        self, run_id: str, *, include_result: bool = True
+    ) -> dict[str, Any] | None:
+        """Return one research run without decoding unrelated large artifacts."""
+        self.reconcile_stale_research_runs()
+        result_column = ", result_json" if include_result else ""
+        with self._connect() as connection:
+            row = connection.execute(
+                f"""SELECT run_id,action,status,started_at,finished_at,params_json
+                {result_column}, error FROM research_runs WHERE run_id=?""",
+                (str(run_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        raw_params = item.pop("params_json", None)
+        try:
+            item["params"] = json.loads(raw_params) if raw_params else None
+        except (TypeError, json.JSONDecodeError):
+            item["params"] = None
+        if include_result:
+            raw_result = item.pop("result_json", None)
+            try:
+                item["result"] = json.loads(raw_result) if raw_result else None
+            except (TypeError, json.JSONDecodeError):
+                item["result"] = None
+        else:
+            item["result"] = None
+        return item
+
     def reconcile_stale_research_runs(self, max_age_minutes: int = 180) -> int:
         """Mark abandoned long-running research rows as interrupted.
 
