@@ -3733,11 +3733,30 @@ def _backtest_dashboard_payload(
         ),
         None,
     )
-    selected_run_id = str((completed_full or completed_other or {}).get("run_id") or "")
-    if selected_run_id and hasattr(storage, "get_research_run"):
-        selected = storage.get_research_run(selected_run_id, include_result=True)
-        if selected:
-            runs = [selected] + [item for item in runs if item.get("run_id") != selected_run_id]
+    training_meta = next(
+        (
+            item for item in runs
+            if item.get("status") == "completed"
+            and item.get("action") in {"historical_train", "train"}
+        ),
+        None,
+    )
+    selected_ids = {
+        str((completed_full or completed_other or {}).get("run_id") or ""),
+        str((training_meta or {}).get("run_id") or ""),
+    }
+    selected_ids.discard("")
+    if selected_ids and hasattr(storage, "get_research_run"):
+        hydrated: dict[str, dict[str, Any]] = {}
+        for run_id in selected_ids:
+            selected = storage.get_research_run(run_id, include_result=True)
+            if selected:
+                hydrated[run_id] = selected
+        if hydrated:
+            runs = [
+                hydrated.get(str(item.get("run_id"))) or item
+                for item in runs
+            ]
     # Prefer a complete research artifact for report-wide fields.  An
     # ``optimize`` run is intentionally compact and omits dataset quality and
     # Walk-Forward summaries; selecting it first makes the dashboard display
